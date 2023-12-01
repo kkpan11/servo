@@ -8,50 +8,28 @@
 //! list building, as the actual painting does not happen here—only deciding *what* we're going to
 //! paint.
 
-use crate::block::BlockFlow;
-use crate::context::LayoutContext;
-use crate::display_list::background::{self, get_cyclic};
-use crate::display_list::border;
-use crate::display_list::gradient;
-use crate::display_list::items::{self, BaseDisplayItem, ClipScrollNode};
-use crate::display_list::items::{
-    ClipScrollNodeIndex, ClipScrollNodeType, ClipType, ClippingAndScrolling,
-};
-use crate::display_list::items::{ClippingRegion, DisplayItem, DisplayItemMetadata, DisplayList};
-use crate::display_list::items::{CommonDisplayItem, DisplayListSection};
-use crate::display_list::items::{IframeDisplayItem, OpaqueNode};
-use crate::display_list::items::{PopAllTextShadowsDisplayItem, PushTextShadowDisplayItem};
-use crate::display_list::items::{StackingContext, StackingContextType, StickyFrameData};
-use crate::display_list::items::{TextOrientation, WebRenderImageInfo};
-use crate::display_list::ToLayout;
-use crate::flow::{BaseFlow, Flow, FlowFlags};
-use crate::flow_ref::FlowRef;
-use crate::fragment::SpecificFragmentInfo;
-use crate::fragment::{CanvasFragmentSource, CoordinateSystem, Fragment, ScannedTextFragmentInfo};
-use crate::inline::InlineFragmentNodeFlags;
-use crate::model::MaybeAuto;
-use crate::table_cell::CollapsedBordersForCell;
+use std::default::Default;
+use std::sync::Arc;
+use std::{f32, mem};
+
 use app_units::{Au, AU_PER_PX};
+use bitflags::bitflags;
 use canvas_traits::canvas::{CanvasMsg, FromLayoutMsg};
 use embedder_traits::Cursor;
-use euclid::{
-    default::{Point2D, Rect, SideOffsets2D as UntypedSideOffsets2D, Size2D},
-    rect, SideOffsets2D,
-};
+use euclid::default::{Point2D, Rect, SideOffsets2D as UntypedSideOffsets2D, Size2D};
+use euclid::{rect, SideOffsets2D};
 use fnv::FnvHashMap;
 use gfx::text::glyph::ByteIndex;
 use gfx::text::TextRun;
 use gfx_traits::{combine_id_with_fragment_type, FragmentType, StackingContextId};
 use ipc_channel::ipc;
+use log::{debug, warn};
 use msg::constellation_msg::{BrowsingContextId, PipelineId};
 use net_traits::image_cache::UsePlaceholder;
 use range::Range;
 use servo_config::opts;
 use servo_geometry::{self, MaxRect};
-use std::default::Default;
-use std::f32;
-use std::mem;
-use std::sync::Arc;
+use style::color::AbsoluteColor;
 use style::computed_values::border_style::T as BorderStyle;
 use style::computed_values::overflow_x::T as StyleOverflow;
 use style::computed_values::pointer_events::T as PointerEvents;
@@ -66,13 +44,33 @@ use style::values::computed::{ClipRectOrAuto, Gradient};
 use style::values::generics::background::BackgroundSize;
 use style::values::generics::image::PaintWorklet;
 use style::values::specified::ui::CursorKind;
-use style::values::RGBA;
 use style_traits::{CSSPixel, ToCss};
 use webrender_api::units::{LayoutRect, LayoutTransform, LayoutVector2D};
-use webrender_api::{self, BorderDetails, BorderRadius, BorderSide, BoxShadowClipMode, ColorF};
-use webrender_api::{ColorU, ExternalScrollId, FilterOp, GlyphInstance, ImageRendering, LineStyle};
-use webrender_api::{NinePatchBorder, NinePatchBorderSource, NormalBorder, PropertyBinding};
-use webrender_api::{ScrollSensitivity, StickyOffsetBounds};
+use webrender_api::{
+    self, BorderDetails, BorderRadius, BorderSide, BoxShadowClipMode, ColorF, ColorU,
+    ExternalScrollId, FilterOp, GlyphInstance, ImageRendering, LineStyle, NinePatchBorder,
+    NinePatchBorderSource, NormalBorder, PropertyBinding, ScrollSensitivity, StickyOffsetBounds,
+};
+
+use crate::block::BlockFlow;
+use crate::context::LayoutContext;
+use crate::display_list::background::{self, get_cyclic};
+use crate::display_list::items::{
+    self, BaseDisplayItem, ClipScrollNode, ClipScrollNodeIndex, ClipScrollNodeType, ClipType,
+    ClippingAndScrolling, ClippingRegion, CommonDisplayItem, DisplayItem, DisplayItemMetadata,
+    DisplayList, DisplayListSection, IframeDisplayItem, OpaqueNode, PopAllTextShadowsDisplayItem,
+    PushTextShadowDisplayItem, StackingContext, StackingContextType, StickyFrameData,
+    TextOrientation, WebRenderImageInfo,
+};
+use crate::display_list::{border, gradient, FilterToLayout, ToLayout};
+use crate::flow::{BaseFlow, Flow, FlowFlags};
+use crate::flow_ref::FlowRef;
+use crate::fragment::{
+    CanvasFragmentSource, CoordinateSystem, Fragment, ScannedTextFragmentInfo, SpecificFragmentInfo,
+};
+use crate::inline::InlineFragmentNodeFlags;
+use crate::model::MaybeAuto;
+use crate::table_cell::CollapsedBordersForCell;
 
 static THREAD_TINT_COLORS: [ColorF; 8] = [
     ColorF {
@@ -653,7 +651,7 @@ impl Fragment {
         absolute_bounds: Rect<Au>,
     ) {
         let background = style.get_background();
-        let background_color = style.resolve_color(background.background_color);
+        let background_color = style.resolve_color(background.background_color.clone());
         // XXXManishearth the below method should ideally use an iterator over
         // backgrounds
         self.build_display_list_for_background_if_applicable_with_background(
@@ -673,7 +671,7 @@ impl Fragment {
         state: &mut DisplayListBuildState,
         style: &ComputedValues,
         background: &style_structs::Background,
-        background_color: RGBA,
+        background_color: AbsoluteColor,
         display_list_section: DisplayListSection,
         absolute_bounds: Rect<Au>,
     ) {
@@ -829,9 +827,10 @@ impl Fragment {
             index,
         );
 
-        if placement.tile_size.is_empty() {
-            return;
-        }
+        let placement = match placement {
+            Some(placement) => placement,
+            None => return,
+        };
 
         state.clipping_and_scrolling_scope(|state| {
             if !placement.clip_radii.is_zero() {
@@ -951,6 +950,11 @@ impl Fragment {
             index,
         );
 
+        let placement = match placement {
+            Some(placement) => placement,
+            None => return,
+        };
+
         state.clipping_and_scrolling_scope(|state| {
             if !placement.clip_radii.is_zero() {
                 let clip_id =
@@ -1037,7 +1041,9 @@ impl Fragment {
                 webrender_api::BoxShadowDisplayItem {
                     common: items::empty_common_item_properties(),
                     box_bounds: absolute_bounds.to_layout(),
-                    color: style.resolve_color(box_shadow.base.color).to_layout(),
+                    color: style
+                        .resolve_color(box_shadow.base.color.clone())
+                        .to_layout(),
                     offset: LayoutVector2D::new(
                         box_shadow.base.horizontal.px(),
                         box_shadow.base.vertical.px(),
@@ -1083,10 +1089,10 @@ impl Fragment {
 
         let border_style_struct = style.get_border();
         let mut colors = SideOffsets2D::new(
-            border_style_struct.border_top_color,
-            border_style_struct.border_right_color,
-            border_style_struct.border_bottom_color,
-            border_style_struct.border_left_color,
+            border_style_struct.border_top_color.clone(),
+            border_style_struct.border_right_color.clone(),
+            border_style_struct.border_bottom_color.clone(),
+            border_style_struct.border_left_color.clone(),
         );
         let mut border_style = SideOffsets2D::new(
             border_style_struct.border_top_style,
@@ -1183,19 +1189,20 @@ impl Fragment {
         let border_style_struct = style.get_border();
         let border_image_outset =
             border::image_outset(border_style_struct.border_image_outset, border_width);
-        let border_image_area = bounds.outer_rect(border_image_outset).size;
+        let border_image_area = bounds.outer_rect(border_image_outset);
+        let border_image_size = border_image_area.size;
         let border_image_width = border::image_width(
             &border_style_struct.border_image_width,
             border_width.to_layout(),
-            border_image_area,
+            border_image_size,
         );
         let border_image_repeat = &border_style_struct.border_image_repeat;
         let border_image_fill = border_style_struct.border_image_slice.fill;
         let border_image_slice = &border_style_struct.border_image_slice.offsets;
 
         let mut stops = Vec::new();
-        let mut width = border_image_area.width.to_px() as u32;
-        let mut height = border_image_area.height.to_px() as u32;
+        let mut width = border_image_size.width.to_px() as u32;
+        let mut height = border_image_size.height.to_px() as u32;
         let source = match image {
             Image::Url(ref image_url) => {
                 let url = image_url.url()?;
@@ -1213,7 +1220,7 @@ impl Fragment {
                     state,
                     style,
                     paint_worklet,
-                    border_image_area,
+                    border_image_size,
                 )?;
                 width = image.width;
                 height = image.height;
@@ -1227,7 +1234,7 @@ impl Fragment {
                     compat_mode: _,
                 } => {
                     let (wr_gradient, linear_stops) =
-                        gradient::linear(style, border_image_area, items, *direction, *repeating);
+                        gradient::linear(style, border_image_size, items, *direction, *repeating);
                     stops = linear_stops;
                     NinePatchBorderSource::Gradient(wr_gradient)
                 },
@@ -1240,7 +1247,7 @@ impl Fragment {
                 } => {
                     let (wr_gradient, radial_stops) = gradient::radial(
                         style,
-                        border_image_area,
+                        border_image_size,
                         items,
                         shape,
                         position,
@@ -1264,17 +1271,12 @@ impl Fragment {
             fill: border_image_fill,
             repeat_horizontal: border_image_repeat.0.to_layout(),
             repeat_vertical: border_image_repeat.1.to_layout(),
-            outset: SideOffsets2D::new(
-                border_image_outset.top.to_f32_px(),
-                border_image_outset.right.to_f32_px(),
-                border_image_outset.bottom.to_f32_px(),
-                border_image_outset.left.to_f32_px(),
-            ),
+            outset: SideOffsets2D::zero(),
         });
         state.add_display_item(DisplayItem::Border(CommonDisplayItem::with_data(
             base,
             webrender_api::BorderDisplayItem {
-                bounds: bounds.to_layout(),
+                bounds: border_image_area.to_layout(),
                 common: items::empty_common_item_properties(),
                 widths: border_image_width,
                 details,
@@ -1316,7 +1318,7 @@ impl Fragment {
 
         // Append the outline to the display list.
         let color = style
-            .resolve_color(style.get_outline().outline_color)
+            .resolve_color(style.get_outline().outline_color.clone())
             .to_layout();
         let base = state.create_base_display_item(
             clip,
@@ -1451,7 +1453,8 @@ impl Fragment {
         // TODO: Allow non-text fragments to be selected too.
         if scanned_text_fragment_info.selected() {
             let style = self.selected_style();
-            let background_color = style.resolve_color(style.get_background().background_color);
+            let background_color =
+                style.resolve_color(style.get_background().background_color.clone());
             let base = state.create_base_display_item(
                 stacking_relative_border_box,
                 self.node,
@@ -1570,7 +1573,7 @@ impl Fragment {
         }
 
         // If this fragment takes up no space, we don't need to build any display items for it.
-        if self.has_non_invertible_transform() {
+        if self.has_non_invertible_transform_or_zero_scale() {
             return;
         }
 
@@ -1972,8 +1975,14 @@ impl Fragment {
             .translate(-border_box_offset.to_vector());
 
         // Create the filter pipeline.
+        let current_color = self.style().clone_color();
         let effects = self.style().get_effects();
-        let mut filters: Vec<FilterOp> = effects.filter.0.iter().map(ToLayout::to_layout).collect();
+        let mut filters: Vec<FilterOp> = effects
+            .filter
+            .0
+            .iter()
+            .map(|filter| FilterToLayout::to_layout(filter, &current_color))
+            .collect();
         if effects.opacity != 1.0 {
             filters.push(FilterOp::Opacity(effects.opacity.into(), effects.opacity));
         }
@@ -2055,7 +2064,7 @@ impl Fragment {
                     base: base.clone(),
                     shadow: webrender_api::Shadow {
                         offset: LayoutVector2D::new(shadow.horizontal.px(), shadow.vertical.px()),
-                        color: self.style.resolve_color(shadow.color).to_layout(),
+                        color: self.style.resolve_color(shadow.color.clone()).to_layout(),
                         blur_radius: shadow.blur.px(),
                     },
                 },
@@ -2110,7 +2119,7 @@ impl Fragment {
         }
 
         // Text
-        let mut glyphs = convert_text_run_to_glyphs(
+        let (largest_advance, mut glyphs) = convert_text_run_to_glyphs(
             text_fragment.run.clone(),
             text_fragment.range,
             baseline_origin,
@@ -2124,6 +2133,22 @@ impl Fragment {
         };
         state.indexable_text.insert(self.node, indexable_text);
 
+        // FIXME(mrobinson, #30313): This is a serious hack to enable a WebRender upgrade.
+        // Servo is not calculating glyph boundaries and is instead relying on the
+        // measured size of the content box here -- which is based on the positioning
+        // of the text. The issue is that glyphs can extend beyond the boundaries
+        // established by their brush origin and advance. Servo should be measuring
+        // the ink boundary rectangle based on the brush origin and the glyph extents
+        // instead.
+        //
+        // We don't yet have that information here, so in the meantime simply expand
+        // the boundary rectangle of the text by the largest character advance of the
+        // painted text run in all directions. This is used as a heuristic for a
+        // reasonable amount of "fudge" space to include the entire text run.
+        let inflated_bounds = stacking_relative_content_box
+            .inflate(largest_advance, largest_advance)
+            .to_layout();
+
         // Process glyphs in chunks to avoid overflowing WebRender's internal limits (#17230).
         while !glyphs.is_empty() {
             let mut rest_of_glyphs = vec![];
@@ -2135,7 +2160,7 @@ impl Fragment {
             state.add_display_item(DisplayItem::Text(CommonDisplayItem::with_data(
                 base.clone(),
                 webrender_api::TextDisplayItem {
-                    bounds: stacking_relative_content_box.to_layout(),
+                    bounds: inflated_bounds,
                     common: items::empty_common_item_properties(),
                     font_key: text_fragment.run.font_key,
                     color: text_color.to_layout(),
@@ -2177,7 +2202,7 @@ impl Fragment {
     fn build_display_list_for_text_decoration(
         &self,
         state: &mut DisplayListBuildState,
-        color: &RGBA,
+        color: &AbsoluteColor,
         stacking_relative_box: &LogicalRect<Au>,
         clip: Rect<Au>,
     ) {
@@ -2220,6 +2245,7 @@ impl Fragment {
 }
 
 bitflags! {
+    #[derive(Clone, Copy)]
     pub struct StackingContextCollectionFlags: u8 {
         /// This flow never establishes a containing block.
         const POSITION_NEVER_CREATES_CONTAINING_BLOCK = 0b001;
@@ -2393,7 +2419,7 @@ impl BlockFlow {
         flags: StackingContextCollectionFlags,
     ) {
         // This block flow produces no stacking contexts if it takes up no space.
-        if self.has_non_invertible_transform() {
+        if self.has_non_invertible_transform_or_zero_scale() {
             return;
         }
 
@@ -2567,11 +2593,10 @@ impl BlockFlow {
         // order to properly calculate max offsets we need to compare our size and
         // position in our parent's coordinate system.
         let border_box_in_parent = self.stacking_relative_border_box(CoordinateSystem::Parent);
-        let margins = self.fragment.margin.to_physical(
-            self.base
-                .early_absolute_position_info
-                .relative_containing_block_mode,
-        );
+        let margins = self
+            .fragment
+            .margin
+            .to_physical(self.fragment.style.writing_mode);
 
         // Position:sticky elements are always restricted based on the size and position of
         // their containing block, which for sticky items is like relative and statically
@@ -2834,7 +2859,7 @@ impl BlockFlow {
         &self,
         state: &mut DisplayListBuildState,
         background: &style_structs::Background,
-        background_color: RGBA,
+        background_color: AbsoluteColor,
     ) {
         let stacking_relative_border_box = self
             .base
@@ -3005,7 +3030,8 @@ fn convert_text_run_to_glyphs(
     text_run: Arc<TextRun>,
     range: Range<ByteIndex>,
     mut origin: Point2D<Au>,
-) -> Vec<GlyphInstance> {
+) -> (Au, Vec<GlyphInstance>) {
+    let mut largest_advance = Au(0);
     let mut glyphs = vec![];
 
     for slice in text_run.natural_word_slices_in_visual_order(&range) {
@@ -3015,6 +3041,8 @@ fn convert_text_run_to_glyphs(
             } else {
                 glyph.advance()
             };
+            largest_advance = largest_advance.max(glyph.advance());
+
             if !slice.glyphs.is_whitespace() {
                 let glyph_offset = glyph.offset().unwrap_or(Point2D::zero());
                 let point = origin + glyph_offset.to_vector();
@@ -3027,7 +3055,7 @@ fn convert_text_run_to_glyphs(
             origin.x += glyph_advance;
         }
     }
-    return glyphs;
+    (largest_advance, glyphs)
 }
 
 pub struct IndexableTextItem {

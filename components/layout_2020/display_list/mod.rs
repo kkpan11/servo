@@ -2,22 +2,18 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
-use crate::context::LayoutContext;
-use crate::display_list::conversions::ToWebRender;
-use crate::display_list::stacking_context::StackingContextSection;
-use crate::fragment_tree::{BoxFragment, Fragment, FragmentTree, Tag, TextFragment};
-use crate::geom::{PhysicalPoint, PhysicalRect};
-use crate::replaced::IntrinsicSizes;
-use crate::style_ext::ComputedValuesExt;
+use std::cell::OnceCell;
+use std::sync::Arc;
+
 use embedder_traits::Cursor;
 use euclid::{Point2D, SideOffsets2D, Size2D};
 use fnv::FnvHashMap;
 use gfx::text::glyph::GlyphStore;
-use mitochondria::OnceCell;
+use gfx_traits::WebRenderEpochToU16;
 use msg::constellation_msg::BrowsingContextId;
 use net_traits::image_cache::UsePlaceholder;
 use script_traits::compositor::{CompositorDisplayListInfo, ScrollTreeNodeId};
-use std::sync::Arc;
+use style::color::{AbsoluteColor, ColorSpace};
 use style::computed_values::text_decoration_style::T as ComputedTextDecorationStyle;
 use style::dom::OpaqueNode;
 use style::properties::longhands::visibility::computed_value::T as Visibility;
@@ -26,7 +22,15 @@ use style::values::computed::{BorderStyle, Color, Length, LengthPercentage, Outl
 use style::values::specified::text::TextDecorationLine;
 use style::values::specified::ui::CursorKind;
 use style_traits::CSSPixel;
-use webrender_api::{self as wr, units};
+use webrender_api::{self as wr, units, ClipChainId, ClipId, CommonItemProperties};
+
+use crate::context::LayoutContext;
+use crate::display_list::conversions::ToWebRender;
+use crate::display_list::stacking_context::StackingContextSection;
+use crate::fragment_tree::{BoxFragment, Fragment, FragmentTree, Tag, TextFragment};
+use crate::geom::{PhysicalPoint, PhysicalRect};
+use crate::replaced::IntrinsicSizes;
+use crate::style_ext::ComputedValuesExt;
 
 mod background;
 mod conversions;
@@ -71,7 +75,7 @@ impl DisplayList {
         epoch: wr::Epoch,
     ) -> Self {
         Self {
-            wr: wr::DisplayListBuilder::new(pipeline_id, content_size),
+            wr: wr::DisplayListBuilder::new(pipeline_id),
             compositor_info: CompositorDisplayListInfo::new(
                 viewport_size,
                 content_size,
@@ -93,7 +97,7 @@ pub(crate) struct DisplayListBuilder<'a> {
     /// only passing the builder instead passing the containing
     /// [stacking_context::StackingContextFragment] as an argument to display
     /// list building functions.
-    current_clip_id: wr::ClipId,
+    current_clip_chain_id: ClipChainId,
 
     /// The [OpaqueNode] handle to the node used to paint the page background
     /// if the background was a canvas.
@@ -126,8 +130,8 @@ impl DisplayList {
         root_stacking_context: &StackingContext,
     ) -> (FnvHashMap<BrowsingContextId, Size2D<f32, CSSPixel>>, bool) {
         let mut builder = DisplayListBuilder {
-            current_scroll_node_id: self.compositor_info.root_scroll_node_id,
-            current_clip_id: wr::ClipId::root(self.wr.pipeline_id),
+            current_scroll_node_id: self.compositor_info.root_reference_frame_id,
+            current_clip_chain_id: ClipChainId(0, self.compositor_info.pipeline_id),
             element_for_canvas_background: fragment_tree.canvas_background.from_element,
             is_contentful: false,
             context,
@@ -155,8 +159,7 @@ impl<'a> DisplayListBuilder<'a> {
         wr::CommonItemProperties {
             clip_rect,
             spatial_id: self.current_scroll_node_id.spatial_id,
-            clip_id: self.current_clip_id,
-            hit_info: None,
+            clip_id: ClipId::ClipChain(self.current_clip_chain_id),
             flags: style.get_webrender_primitive_flags(),
         }
     }
@@ -179,7 +182,10 @@ impl<'a> DisplayListBuilder<'a> {
             Some(cursor(inherited_ui.cursor.keyword, auto_cursor)),
             self.current_scroll_node_id,
         );
-        Some((hit_test_index as u64, 0u16))
+        Some((
+            hit_test_index as u64,
+            self.display_list.compositor_info.epoch.as_u16(),
+        ))
     }
 }
 
@@ -281,8 +287,21 @@ impl Fragment {
             return;
         }
 
-        let mut common = builder.common_properties(rect.to_webrender(), &fragment.parent_style);
-        common.hit_info = builder.hit_info(&fragment.parent_style, fragment.base.tag, Cursor::Text);
+        if let Some(hit_info) =
+            builder.hit_info(&fragment.parent_style, fragment.base.tag, Cursor::Text)
+        {
+            let clip_chain_id = builder.current_clip_chain_id;
+            let spatial_id = builder.current_scroll_node_id.spatial_id;
+            builder.wr().push_hit_test(
+                &CommonItemProperties {
+                    clip_rect: rect.to_webrender(),
+                    clip_id: ClipId::ClipChain(clip_chain_id),
+                    spatial_id,
+                    flags: fragment.parent_style.get_webrender_primitive_flags(),
+                },
+                hit_info,
+            );
+        }
 
         let color = fragment.parent_style.clone_color();
         let font_metrics = &fragment.font_metrics;
@@ -300,7 +319,7 @@ impl Fragment {
             let mut rect = rect;
             rect.origin.y = rect.origin.y + font_metrics.ascent - font_metrics.underline_offset;
             rect.size.height = round_to_nearest_device_pixel(font_metrics.underline_size);
-            self.build_display_list_for_text_decoration(fragment, builder, &rect, color);
+            self.build_display_list_for_text_decoration(fragment, builder, &rect, &color);
         }
 
         // Overline.
@@ -310,10 +329,11 @@ impl Fragment {
         {
             let mut rect = rect;
             rect.size.height = round_to_nearest_device_pixel(font_metrics.underline_size);
-            self.build_display_list_for_text_decoration(fragment, builder, &rect, color);
+            self.build_display_list_for_text_decoration(fragment, builder, &rect, &color);
         }
 
         // Text.
+        let common = builder.common_properties(rect.to_webrender(), &fragment.parent_style);
         builder.wr().push_text(
             &common,
             rect.to_webrender(),
@@ -332,7 +352,7 @@ impl Fragment {
             rect.origin.y = rect.origin.y + font_metrics.ascent - font_metrics.strikeout_offset;
             // XXX(ferjm) This does not work on MacOS #942
             rect.size.height = round_to_nearest_device_pixel(font_metrics.strikeout_size);
-            self.build_display_list_for_text_decoration(fragment, builder, &rect, color);
+            self.build_display_list_for_text_decoration(fragment, builder, &rect, &color);
         }
     }
 
@@ -341,14 +361,14 @@ impl Fragment {
         fragment: &TextFragment,
         builder: &mut DisplayListBuilder,
         rect: &PhysicalRect<Length>,
-        color: cssparser::RGBA,
+        color: &AbsoluteColor,
     ) {
         let rect = rect.to_webrender();
         let wavy_line_thickness = (0.33 * rect.size.height).ceil();
         let text_decoration_color = fragment
             .parent_style
             .clone_text_decoration_color()
-            .to_rgba(color);
+            .resolve_to_absolute(color);
         let text_decoration_style = fragment.parent_style.clone_text_decoration_style();
         if text_decoration_style == ComputedTextDecorationStyle::MozNone {
             return;
@@ -372,9 +392,9 @@ struct BuilderForBoxFragment<'a> {
     padding_rect: OnceCell<units::LayoutRect>,
     content_rect: OnceCell<units::LayoutRect>,
     border_radius: wr::BorderRadius,
-    border_edge_clip_id: OnceCell<Option<wr::ClipId>>,
-    padding_edge_clip_id: OnceCell<Option<wr::ClipId>>,
-    content_edge_clip_id: OnceCell<Option<wr::ClipId>>,
+    border_edge_clip_chain_id: OnceCell<Option<ClipChainId>>,
+    padding_edge_clip_chain_id: OnceCell<Option<ClipChainId>>,
+    content_edge_clip_chain_id: OnceCell<Option<ClipChainId>>,
 }
 
 impl<'a> BuilderForBoxFragment<'a> {
@@ -429,14 +449,14 @@ impl<'a> BuilderForBoxFragment<'a> {
             border_radius,
             padding_rect: OnceCell::new(),
             content_rect: OnceCell::new(),
-            border_edge_clip_id: OnceCell::new(),
-            padding_edge_clip_id: OnceCell::new(),
-            content_edge_clip_id: OnceCell::new(),
+            border_edge_clip_chain_id: OnceCell::new(),
+            padding_edge_clip_chain_id: OnceCell::new(),
+            content_edge_clip_chain_id: OnceCell::new(),
         }
     }
 
     fn content_rect(&self) -> &units::LayoutRect {
-        self.content_rect.init_once(|| {
+        self.content_rect.get_or_init(|| {
             self.fragment
                 .content_rect
                 .to_physical(self.fragment.style.writing_mode, self.containing_block)
@@ -446,7 +466,7 @@ impl<'a> BuilderForBoxFragment<'a> {
     }
 
     fn padding_rect(&self) -> &units::LayoutRect {
-        self.padding_rect.init_once(|| {
+        self.padding_rect.get_or_init(|| {
             self.fragment
                 .padding_rect()
                 .to_physical(self.fragment.style.writing_mode, self.containing_block)
@@ -455,14 +475,14 @@ impl<'a> BuilderForBoxFragment<'a> {
         })
     }
 
-    fn border_edge_clip(&self, builder: &mut DisplayListBuilder) -> Option<wr::ClipId> {
+    fn border_edge_clip(&self, builder: &mut DisplayListBuilder) -> Option<ClipChainId> {
         *self
-            .border_edge_clip_id
-            .init_once(|| clip_for_radii(self.border_radius, self.border_rect, builder))
+            .border_edge_clip_chain_id
+            .get_or_init(|| clip_for_radii(self.border_radius, self.border_rect, builder))
     }
 
-    fn padding_edge_clip(&self, builder: &mut DisplayListBuilder) -> Option<wr::ClipId> {
-        *self.padding_edge_clip_id.init_once(|| {
+    fn padding_edge_clip(&self, builder: &mut DisplayListBuilder) -> Option<ClipChainId> {
+        *self.padding_edge_clip_chain_id.get_or_init(|| {
             clip_for_radii(
                 inner_radii(
                     self.border_radius,
@@ -477,8 +497,8 @@ impl<'a> BuilderForBoxFragment<'a> {
         })
     }
 
-    fn content_edge_clip(&self, builder: &mut DisplayListBuilder) -> Option<wr::ClipId> {
-        *self.content_edge_clip_id.init_once(|| {
+    fn content_edge_clip(&self, builder: &mut DisplayListBuilder) -> Option<ClipChainId> {
+        *self.content_edge_clip_chain_id.get_or_init(|| {
             clip_for_radii(
                 inner_radii(
                     self.border_radius,
@@ -508,14 +528,16 @@ impl<'a> BuilderForBoxFragment<'a> {
             self.fragment.base.tag,
             Cursor::Default,
         );
-        if hit_info.is_some() {
-            let mut common = builder.common_properties(self.border_rect, &self.fragment.style);
-            common.hit_info = hit_info;
-            if let Some(clip_id) = self.border_edge_clip(builder) {
-                common.clip_id = clip_id
-            }
-            builder.wr().push_hit_test(&common)
+        let hit_info = match hit_info {
+            Some(hit_info) => hit_info,
+            None => return,
+        };
+
+        let mut common = builder.common_properties(self.border_rect, &self.fragment.style);
+        if let Some(clip_chain_id) = self.border_edge_clip(builder) {
+            common.clip_id = ClipId::ClipChain(clip_chain_id);
         }
+        builder.wr().push_hit_test(&common, hit_info);
     }
 
     fn build_background(&mut self, builder: &mut DisplayListBuilder) {
@@ -531,8 +553,8 @@ impl<'a> BuilderForBoxFragment<'a> {
         let source = background::Source::Fragment;
         let style = &self.fragment.style;
         let b = style.get_background();
-        let background_color = style.resolve_color(b.background_color);
-        if background_color.alpha > 0 {
+        let background_color = style.resolve_color(b.background_color.clone());
+        if background_color.alpha > 0.0 {
             // https://drafts.csswg.org/css-backgrounds/#background-color
             // “The background color is clipped according to the background-clip
             //  value associated with the bottom-most background image layer.”
@@ -562,11 +584,7 @@ impl<'a> BuilderForBoxFragment<'a> {
             match image {
                 Image::None => {},
                 Image::Gradient(ref gradient) => {
-                    let intrinsic = IntrinsicSizes {
-                        width: None,
-                        height: None,
-                        ratio: None,
-                    };
+                    let intrinsic = IntrinsicSizes::empty();
                     if let Some(layer) =
                         &background::layout_layer(self, &source, builder, index, intrinsic)
                     {
@@ -603,13 +621,10 @@ impl<'a> BuilderForBoxFragment<'a> {
 
                     // FIXME: https://drafts.csswg.org/css-images-4/#the-image-resolution
                     let dppx = 1.0;
-
-                    let intrinsic = IntrinsicSizes {
-                        width: Some(Length::new(width as f32 / dppx)),
-                        height: Some(Length::new(height as f32 / dppx)),
-                        // FIXME https://github.com/w3c/csswg-drafts/issues/4572
-                        ratio: Some(width as f32 / height as f32),
-                    };
+                    let intrinsic = IntrinsicSizes::from_width_and_height(
+                        width as f32 / dppx,
+                        height as f32 / dppx,
+                    );
 
                     if let Some(layer) =
                         background::layout_layer(self, &source, builder, index, intrinsic)
@@ -671,20 +686,25 @@ impl<'a> BuilderForBoxFragment<'a> {
     fn build_border(&mut self, builder: &mut DisplayListBuilder) {
         let border = self.fragment.style.get_border();
         let widths = SideOffsets2D::new(
-            border.border_top_width.px(),
-            border.border_right_width.px(),
-            border.border_bottom_width.px(),
-            border.border_left_width.px(),
+            border.border_top_width.to_f32_px(),
+            border.border_right_width.to_f32_px(),
+            border.border_bottom_width.to_f32_px(),
+            border.border_left_width.to_f32_px(),
         );
         if widths == SideOffsets2D::zero() {
             return;
         }
         let common = builder.common_properties(self.border_rect, &self.fragment.style);
         let details = wr::BorderDetails::Normal(wr::NormalBorder {
-            top: self.build_border_side(border.border_top_style, border.border_top_color),
-            right: self.build_border_side(border.border_right_style, border.border_right_color),
-            bottom: self.build_border_side(border.border_bottom_style, border.border_bottom_color),
-            left: self.build_border_side(border.border_left_style, border.border_left_color),
+            top: self.build_border_side(border.border_top_style, border.border_top_color.clone()),
+            right: self
+                .build_border_side(border.border_right_style, border.border_right_color.clone()),
+            bottom: self.build_border_side(
+                border.border_bottom_style,
+                border.border_bottom_color.clone(),
+            ),
+            left: self
+                .build_border_side(border.border_left_style, border.border_left_color.clone()),
             radius: self.border_radius,
             do_aa: true,
         });
@@ -695,7 +715,7 @@ impl<'a> BuilderForBoxFragment<'a> {
 
     fn build_outline(&mut self, builder: &mut DisplayListBuilder) {
         let outline = self.fragment.style.get_outline();
-        let width = outline.outline_width.px();
+        let width = outline.outline_width.to_f32_px();
         if width == 0.0 {
             return;
         }
@@ -714,7 +734,7 @@ impl<'a> BuilderForBoxFragment<'a> {
             OutlineStyle::Auto => BorderStyle::Solid,
             OutlineStyle::BorderStyle(s) => s,
         };
-        let side = self.build_border_side(style, outline.outline_color);
+        let side = self.build_border_side(style, outline.outline_color.clone());
         let details = wr::BorderDetails::Normal(wr::NormalBorder {
             top: side,
             right: side,
@@ -729,12 +749,13 @@ impl<'a> BuilderForBoxFragment<'a> {
     }
 }
 
-fn rgba(rgba: cssparser::RGBA) -> wr::ColorF {
+fn rgba(color: AbsoluteColor) -> wr::ColorF {
+    let rgba = color.to_color_space(ColorSpace::Srgb);
     wr::ColorF::new(
-        rgba.red_f32(),
-        rgba.green_f32(),
-        rgba.blue_f32(),
-        rgba.alpha_f32(),
+        rgba.components.0.clamp(0.0, 1.0),
+        rgba.components.1.clamp(0.0, 1.0),
+        rgba.components.2.clamp(0.0, 1.0),
+        rgba.alpha,
     )
 }
 
@@ -866,21 +887,27 @@ fn clip_for_radii(
     radii: wr::BorderRadius,
     rect: units::LayoutRect,
     builder: &mut DisplayListBuilder,
-) -> Option<wr::ClipId> {
+) -> Option<ClipChainId> {
     if radii.is_zero() {
         None
     } else {
+        let clip_chain_id = builder.current_clip_chain_id.clone();
         let parent_space_and_clip = wr::SpaceAndClipInfo {
             spatial_id: builder.current_scroll_node_id.spatial_id,
-            clip_id: builder.current_clip_id,
+            clip_id: ClipId::ClipChain(clip_chain_id),
         };
-        Some(builder.wr().define_clip_rounded_rect(
+        let new_clip_id = builder.wr().define_clip_rounded_rect(
             &parent_space_and_clip,
             wr::ComplexClipRegion {
                 rect,
                 radii,
                 mode: wr::ClipMode::Clip,
             },
-        ))
+        );
+        Some(
+            builder
+                .wr()
+                .define_clip_chain(Some(clip_chain_id), [new_clip_id]),
+        )
     }
 }

@@ -4,6 +4,14 @@
 
 #![allow(unsafe_code)]
 
+use dom_struct::dom_struct;
+use servo_arc::Arc;
+use style::shared_lock::Locked;
+use style::stylesheets::{
+    AllowImportRules, CssRules, CssRulesHelpers, KeyframesRule, RulesMutateError,
+    StylesheetLoader as StyleStylesheetLoader,
+};
+
 use crate::dom::bindings::cell::DomRefCell;
 use crate::dom::bindings::codegen::Bindings::CSSRuleListBinding::CSSRuleListMethods;
 use crate::dom::bindings::error::{Error, ErrorResult, Fallible};
@@ -14,18 +22,9 @@ use crate::dom::cssrule::CSSRule;
 use crate::dom::cssstylesheet::CSSStyleSheet;
 use crate::dom::htmlelement::HTMLElement;
 use crate::dom::window::Window;
-use crate::style::stylesheets::StylesheetLoader as StyleStylesheetLoader;
 use crate::stylesheet_loader::StylesheetLoader;
-use dom_struct::dom_struct;
-use servo_arc::Arc;
-use style::shared_lock::Locked;
-use style::stylesheets::{
-    AllowImportRules, CssRules, CssRulesHelpers, KeyframesRule, RulesMutateError,
-};
 
 unsafe_no_jsmanaged_fields!(RulesSource);
-
-unsafe_no_jsmanaged_fields!(CssRules);
 
 impl From<RulesMutateError> for Error {
     fn from(other: RulesMutateError) -> Self {
@@ -53,7 +52,7 @@ pub enum RulesSource {
 }
 
 impl CSSRuleList {
-    #[allow(unrooted_must_root)]
+    #[allow(crown::unrooted_must_root)]
     pub fn new_inherited(parent_stylesheet: &CSSStyleSheet, rules: RulesSource) -> CSSRuleList {
         let guard = parent_stylesheet.shared_lock().read();
         let dom_rules = match rules {
@@ -79,7 +78,7 @@ impl CSSRuleList {
         }
     }
 
-    #[allow(unrooted_must_root)]
+    #[allow(crown::unrooted_must_root)]
     pub fn new(
         window: &Window,
         parent_stylesheet: &CSSStyleSheet,
@@ -113,17 +112,15 @@ impl CSSRuleList {
         let loader = owner
             .as_ref()
             .map(|element| StylesheetLoader::for_element(&**element));
-        let new_rule = css_rules.with_raw_offset_arc(|arc| {
-            arc.insert_rule(
-                &parent_stylesheet.shared_lock,
-                rule,
-                &parent_stylesheet.contents,
-                index,
-                nested,
-                loader.as_ref().map(|l| l as &dyn StyleStylesheetLoader),
-                AllowImportRules::Yes,
-            )
-        })?;
+        let new_rule = css_rules.insert_rule(
+            &parent_stylesheet.shared_lock,
+            rule,
+            &parent_stylesheet.contents,
+            index,
+            nested,
+            loader.as_ref().map(|l| l as &dyn StyleStylesheetLoader),
+            AllowImportRules::Yes,
+        )?;
 
         let parent_stylesheet = &*self.parent_stylesheet;
         let dom_rule = CSSRule::new_specific(&window, parent_stylesheet, new_rule);

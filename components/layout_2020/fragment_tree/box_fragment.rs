@@ -2,17 +2,21 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
-use super::{BaseFragment, BaseFragmentInfo, CollapsedBlockMargins, Fragment};
-use crate::cell::ArcRefCell;
-use crate::geom::flow_relative::{Rect, Sides};
-use crate::geom::{PhysicalPoint, PhysicalRect, PhysicalSides, PhysicalSize};
 use gfx_traits::print_tree::PrintTree;
+use serde::Serialize;
 use servo_arc::Arc as ServoArc;
 use style::computed_values::overflow_x::T as ComputedOverflow;
 use style::computed_values::position::T as ComputedPosition;
 use style::properties::ComputedValues;
 use style::values::computed::{CSSPixelLength, Length, LengthPercentage, LengthPercentageOrAuto};
 use style::Zero;
+
+use super::{BaseFragment, BaseFragmentInfo, CollapsedBlockMargins, Fragment};
+use crate::cell::ArcRefCell;
+use crate::geom::{
+    LengthOrAuto, LogicalRect, LogicalSides, PhysicalPoint, PhysicalRect, PhysicalSides,
+    PhysicalSize,
+};
 
 #[derive(Serialize)]
 pub(crate) struct BoxFragment {
@@ -25,11 +29,11 @@ pub(crate) struct BoxFragment {
     /// From the containing block’s start corner…?
     /// This might be broken when the containing block is in a different writing mode:
     /// https://drafts.csswg.org/css-writing-modes/#orthogonal-flows
-    pub content_rect: Rect<Length>,
+    pub content_rect: LogicalRect<Length>,
 
-    pub padding: Sides<Length>,
-    pub border: Sides<Length>,
-    pub margin: Sides<Length>,
+    pub padding: LogicalSides<Length>,
+    pub border: LogicalSides<Length>,
+    pub margin: LogicalSides<Length>,
 
     /// When the `clear` property is not set to `none`, it may introduce clearance.
     /// Clearance is some extra spacing that is added above the top margin,
@@ -46,6 +50,11 @@ pub(crate) struct BoxFragment {
 
     /// Whether or not this box was overconstrained in the given dimension.
     overconstrained: PhysicalSize<bool>,
+
+    /// The resolved box insets if this box is `position: sticky`. These are calculated
+    /// during stacking context tree construction because they rely on the size of the
+    /// scroll container.
+    pub(crate) resolved_sticky_insets: Option<PhysicalSides<LengthOrAuto>>,
 }
 
 impl BoxFragment {
@@ -53,10 +62,10 @@ impl BoxFragment {
         base_fragment_info: BaseFragmentInfo,
         style: ServoArc<ComputedValues>,
         children: Vec<Fragment>,
-        content_rect: Rect<Length>,
-        padding: Sides<Length>,
-        border: Sides<Length>,
-        margin: Sides<Length>,
+        content_rect: LogicalRect<Length>,
+        padding: LogicalSides<Length>,
+        border: LogicalSides<Length>,
+        margin: LogicalSides<Length>,
         clearance: Option<Length>,
         block_margins_collapsed_with_children: CollapsedBlockMargins,
     ) -> BoxFragment {
@@ -87,10 +96,10 @@ impl BoxFragment {
         base_fragment_info: BaseFragmentInfo,
         style: ServoArc<ComputedValues>,
         children: Vec<Fragment>,
-        content_rect: Rect<Length>,
-        padding: Sides<Length>,
-        border: Sides<Length>,
-        margin: Sides<Length>,
+        content_rect: LogicalRect<Length>,
+        padding: LogicalSides<Length>,
+        border: LogicalSides<Length>,
+        margin: LogicalSides<Length>,
         clearance: Option<Length>,
         block_margins_collapsed_with_children: CollapsedBlockMargins,
         overconstrained: PhysicalSize<bool>,
@@ -118,6 +127,7 @@ impl BoxFragment {
             block_margins_collapsed_with_children,
             scrollable_overflow_from_children,
             overconstrained,
+            resolved_sticky_insets: None,
         }
     }
 
@@ -140,11 +150,11 @@ impl BoxFragment {
         )
     }
 
-    pub fn padding_rect(&self) -> Rect<Length> {
+    pub fn padding_rect(&self) -> LogicalRect<Length> {
         self.content_rect.inflate(&self.padding)
     }
 
-    pub fn border_rect(&self) -> Rect<Length> {
+    pub fn border_rect(&self) -> LogicalRect<Length> {
         self.padding_rect().inflate(&self.border)
     }
 
@@ -155,6 +165,7 @@ impl BoxFragment {
                 \ncontent={:?}\
                 \npadding rect={:?}\
                 \nborder rect={:?}\
+                \nmargin={:?}\
                 \nclearance={:?}\
                 \nscrollable_overflow={:?}\
                 \noverflow={:?} / {:?}",
@@ -162,6 +173,7 @@ impl BoxFragment {
             self.content_rect,
             self.padding_rect(),
             self.border_rect(),
+            self.margin,
             self.clearance,
             self.scrollable_overflow(&PhysicalRect::zero()),
             self.style.get_box().overflow_x,
@@ -212,7 +224,7 @@ impl BoxFragment {
     pub(crate) fn calculate_resolved_insets_if_positioned(
         &self,
         containing_block: &PhysicalRect<CSSPixelLength>,
-    ) -> PhysicalSides<CSSPixelLength> {
+    ) -> PhysicalSides<LengthOrAuto> {
         let position = self.style.get_box().position;
         debug_assert_ne!(
             position,
@@ -224,6 +236,19 @@ impl BoxFragment {
         let content_rect = self
             .content_rect
             .to_physical(self.style.writing_mode, &containing_block);
+
+        if let Some(resolved_sticky_insets) = self.resolved_sticky_insets {
+            return resolved_sticky_insets;
+        }
+
+        let convert_to_length_or_auto = |sides: PhysicalSides<Length>| {
+            PhysicalSides::new(
+                LengthOrAuto::LengthPercentage(sides.top),
+                LengthOrAuto::LengthPercentage(sides.right),
+                LengthOrAuto::LengthPercentage(sides.bottom),
+                LengthOrAuto::LengthPercentage(sides.left),
+            )
+        };
 
         // "A resolved value special case property like top defined in another
         // specification If the property applies to a positioned element and the
@@ -250,12 +275,11 @@ impl BoxFragment {
                 };
             let (left, right) = get_resolved_axis(&insets.left, &insets.right, cb_width);
             let (top, bottom) = get_resolved_axis(&insets.top, &insets.bottom, cb_height);
-            return PhysicalSides::new(top, right, bottom, left);
+            return convert_to_length_or_auto(PhysicalSides::new(top, right, bottom, left));
         }
 
         debug_assert!(
-            position == ComputedPosition::Fixed || position == ComputedPosition::Absolute,
-            "Got unknown position."
+            position == ComputedPosition::Fixed || position == ComputedPosition::Absolute
         );
 
         let resolve = |value: &LengthPercentageOrAuto, container_length| {
@@ -281,6 +305,6 @@ impl BoxFragment {
             (content_rect.origin.x, cb_width - content_rect.max_x())
         };
 
-        PhysicalSides::new(top, right, bottom, left)
+        convert_to_length_or_auto(PhysicalSides::new(top, right, bottom, left))
     }
 }

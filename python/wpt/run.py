@@ -33,24 +33,18 @@ TRACKER_API_ENV_VAR = "INTERMITTENT_TRACKER_API"
 TRACKER_DASHBOARD_SECRET_ENV_VAR = "INTERMITTENT_TRACKER_DASHBOARD_SECRET"
 
 
-def determine_build_type(kwargs: dict, target_dir: str):
-    if kwargs["release"]:
-        return "release"
-    elif kwargs["debug"]:
-        return "debug"
-    elif os.path.exists(os.path.join(target_dir, "debug")):
-        return "debug"
-    elif os.path.exists(os.path.join(target_dir, "release")):
-        return "release"
-    return "debug"
-
-
 def set_if_none(args: dict, key: str, value):
     if key not in args or args[key] is None:
         args[key] = value
 
 
-def run_tests(**kwargs):
+def run_tests(default_binary_path: str, **kwargs):
+    legacy_layout = kwargs.pop("legacy_layout")
+    message = f"Running WPT tests with {default_binary_path}"
+    if legacy_layout:
+        message += " (legacy layout)"
+    print(message)
+
     # By default, Rayon selects the number of worker threads based on the
     # available CPU count. This doesn't work very well when running tests on CI,
     # since we run so many Servo processes in parallel. The result is a lot of
@@ -79,17 +73,6 @@ def run_tests(**kwargs):
 
     kwargs["user_stylesheets"].append(os.path.join(SERVO_ROOT, "resources", "ahem.css"))
 
-    if "CARGO_TARGET_DIR" in os.environ:
-        target_dir = os.path.join(os.environ["CARGO_TARGET_DIR"])
-    else:
-        target_dir = os.path.join(SERVO_ROOT, "target")
-
-    binary_name = ("servo.exe" if sys.platform == "win32" else "servo")
-
-    default_binary_path = os.path.join(
-        target_dir, determine_build_type(kwargs, target_dir), binary_name
-    )
-
     set_if_none(kwargs, "binary", default_binary_path)
     set_if_none(kwargs, "webdriver_binary", default_binary_path)
 
@@ -103,12 +86,12 @@ def run_tests(**kwargs):
     kwargs.setdefault("binary_args", [])
     if prefs:
         kwargs["binary_args"] += ["--pref=" + pref for pref in prefs]
-    if not kwargs.get("layout_2020", False):
-        kwargs["binary_args"] += ["--legacy-layout"]
+    if legacy_layout:
+        kwargs["binary_args"].append("--legacy-layout")
 
     if not kwargs.get("no_default_test_types"):
         test_types = {
-            "servo": ["testharness", "reftest", "wdspec"],
+            "servo": ["testharness", "reftest", "wdspec", "crashtest"],
             "servodriver": ["testharness", "reftest"],
         }
         product = kwargs.get("product") or "servo"
@@ -120,7 +103,8 @@ def run_tests(**kwargs):
 
     wptcommandline.check_args(kwargs)
 
-    update_args_for_legacy_layout(kwargs)
+    if legacy_layout:
+        update_args_for_legacy_layout(kwargs)
 
     mozlog.commandline.log_formatters["servo"] = (
         ServoFormatter,
@@ -223,9 +207,17 @@ class TrackerDashboardFilter():
         run_id = github_context['run_id']
         build_url = f"{repo_url}/actions/runs/{run_id}"
 
-        commit_title = github_context["event"]["head_commit"]["message"]
-        match = re.match(r"^Auto merge of #(\d+)", commit_title)
-        pr_url = f"{repo_url}/pull/{match.group(1)}" if match else None
+        commit_title = "<no title>"
+        if "merge_group" in github_context["event"]:
+            commit_title = github_context["event"]["merge_group"]["head_commit"]["message"]
+        if "head_commit" in github_context["event"]:
+            commit_title = github_context["event"]["head_commit"]["message"]
+
+        pr_url = None
+        match = re.match(r"^Auto merge of #(\d+)", commit_title) or \
+            re.match(r"\(#(\d+)\)", commit_title)
+        if match:
+            pr_url = f"{repo_url}/pull/{match.group(1)}" if match else None
 
         return GithubContextInformation(
             build_url,
@@ -297,7 +289,7 @@ def filter_intermittents(
     def add_result(output, text, results: List[UnexpectedResult], filter_func) -> None:
         filtered = [str(result) for result in filter(filter_func, results)]
         if filtered:
-            output += [f"{text} ({len(results)}): ", *filtered]
+            output += [f"{text} ({len(filtered)}): ", *filtered]
 
     def is_stable_and_unexpected(result):
         return not result.flaky and not result.issues

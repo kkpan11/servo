@@ -2,20 +2,26 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
-use crate::dom::bindings::cell::DomRefCell;
-use crate::dom::bindings::codegen::Bindings::GPUBufferBinding::GPUSize64;
-use crate::dom::bindings::codegen::Bindings::GPUCommandEncoderBinding::{
-    GPUBufferCopyView, GPUCommandBufferDescriptor, GPUCommandEncoderMethods,
-    GPUComputePassDescriptor, GPUOrigin3D, GPURenderPassDescriptor, GPUStencilLoadValue,
-    GPUStoreOp, GPUTextureCopyView, GPUTextureDataLayout,
+use std::borrow::Cow;
+use std::cell::Cell;
+use std::collections::HashSet;
+
+use dom_struct::dom_struct;
+use webgpu::wgpu::command as wgpu_com;
+use webgpu::{self, wgt, WebGPU, WebGPURequest};
+
+use super::bindings::codegen::Bindings::WebGPUBinding::{
+    GPUCommandBufferDescriptor, GPUImageCopyBuffer, GPUImageCopyTexture, GPUImageDataLayout,
+    GPULoadOp, GPUTextureAspect,
 };
-use crate::dom::bindings::codegen::Bindings::GPUTextureBinding::GPUExtent3D;
-use crate::dom::bindings::codegen::UnionTypes::{
-    GPULoadOpOrDoubleSequenceOrGPUColorDict as GPUColorLoad, GPULoadOpOrFloat,
+use super::bindings::codegen::UnionTypes::DoubleSequenceOrGPUColorDict;
+use crate::dom::bindings::cell::DomRefCell;
+use crate::dom::bindings::codegen::Bindings::WebGPUBinding::{
+    GPUCommandEncoderMethods, GPUComputePassDescriptor, GPUExtent3D, GPUOrigin3D,
+    GPURenderPassDescriptor, GPUSize64, GPUStoreOp,
 };
 use crate::dom::bindings::num::Finite;
-use crate::dom::bindings::reflector::DomObject;
-use crate::dom::bindings::reflector::{reflect_dom_object, Reflector};
+use crate::dom::bindings::reflector::{reflect_dom_object, DomObject, Reflector};
 use crate::dom::bindings::root::{Dom, DomRoot};
 use crate::dom::bindings::str::USVString;
 use crate::dom::globalscope::GlobalScope;
@@ -24,13 +30,8 @@ use crate::dom::gpucommandbuffer::GPUCommandBuffer;
 use crate::dom::gpucomputepassencoder::GPUComputePassEncoder;
 use crate::dom::gpudevice::{convert_texture_size_to_dict, convert_texture_size_to_wgt, GPUDevice};
 use crate::dom::gpurenderpassencoder::GPURenderPassEncoder;
-use dom_struct::dom_struct;
-use std::borrow::Cow;
-use std::cell::Cell;
-use std::collections::HashSet;
-use webgpu::wgpu::command as wgpu_com;
-use webgpu::{self, wgt, WebGPU, WebGPURequest};
 
+// TODO(sagudev): this is different now
 // https://gpuweb.github.io/gpuweb/#enumdef-encoder-state
 #[derive(MallocSizeOf, PartialEq)]
 pub enum GPUCommandEncoderState {
@@ -44,8 +45,10 @@ pub enum GPUCommandEncoderState {
 pub struct GPUCommandEncoder {
     reflector_: Reflector,
     #[ignore_malloc_size_of = "defined in webgpu"]
+    #[no_trace]
     channel: WebGPU,
-    label: DomRefCell<Option<USVString>>,
+    label: DomRefCell<USVString>,
+    #[no_trace]
     encoder: webgpu::WebGPUCommandEncoder,
     buffers: DomRefCell<HashSet<DomRoot<GPUBuffer>>>,
     state: DomRefCell<GPUCommandEncoderState>,
@@ -58,7 +61,7 @@ impl GPUCommandEncoder {
         channel: WebGPU,
         device: &GPUDevice,
         encoder: webgpu::WebGPUCommandEncoder,
-        label: Option<USVString>,
+        label: USVString,
     ) -> Self {
         Self {
             channel,
@@ -77,7 +80,7 @@ impl GPUCommandEncoder {
         channel: WebGPU,
         device: &GPUDevice,
         encoder: webgpu::WebGPUCommandEncoder,
-        label: Option<USVString>,
+        label: USVString,
     ) -> DomRoot<Self> {
         reflect_dom_object(
             Box::new(GPUCommandEncoder::new_inherited(
@@ -105,12 +108,12 @@ impl GPUCommandEncoder {
 
 impl GPUCommandEncoderMethods for GPUCommandEncoder {
     /// https://gpuweb.github.io/gpuweb/#dom-gpuobjectbase-label
-    fn GetLabel(&self) -> Option<USVString> {
+    fn Label(&self) -> USVString {
         self.label.borrow().clone()
     }
 
     /// https://gpuweb.github.io/gpuweb/#dom-gpuobjectbase-label
-    fn SetLabel(&self, value: Option<USVString>) {
+    fn SetLabel(&self, value: USVString) {
         *self.label.borrow_mut() = value;
     }
 
@@ -127,7 +130,16 @@ impl GPUCommandEncoderMethods for GPUCommandEncoder {
         let compute_pass = if !self.valid.get() {
             None
         } else {
-            Some(wgpu_com::ComputePass::new(self.encoder.0))
+            Some(wgpu_com::ComputePass::new(
+                self.encoder.0,
+                &wgpu_com::ComputePassDescriptor {
+                    label: descriptor
+                        .parent
+                        .label
+                        .as_ref()
+                        .map(|l| Cow::Borrowed(&**l)),
+                },
+            ))
         };
 
         GPUComputePassEncoder::new(
@@ -135,7 +147,7 @@ impl GPUCommandEncoderMethods for GPUCommandEncoder {
             self.channel.clone(),
             &self,
             compute_pass,
-            descriptor.parent.label.as_ref().cloned(),
+            descriptor.parent.label.clone().unwrap_or_default(),
         )
     }
 
@@ -153,38 +165,20 @@ impl GPUCommandEncoderMethods for GPUCommandEncoder {
             None
         } else {
             let depth_stencil = descriptor.depthStencilAttachment.as_ref().map(|depth| {
-                let (depth_load_op, clear_depth) = match depth.depthLoadValue {
-                    GPULoadOpOrFloat::GPULoadOp(_) => (wgpu_com::LoadOp::Load, 0.0f32),
-                    GPULoadOpOrFloat::Float(f) => (wgpu_com::LoadOp::Clear, *f),
-                };
-                let (stencil_load_op, clear_stencil) = match depth.stencilLoadValue {
-                    GPUStencilLoadValue::GPULoadOp(_) => (wgpu_com::LoadOp::Load, 0u32),
-                    GPUStencilLoadValue::RangeEnforcedUnsignedLong(l) => {
-                        (wgpu_com::LoadOp::Clear, l)
+                wgpu_com::RenderPassDepthStencilAttachment {
+                    depth: wgpu_com::PassChannel {
+                        load_op: convert_load_op(depth.depthLoadOp),
+                        store_op: convert_store_op(depth.depthStoreOp),
+                        clear_value: *depth.depthClearValue.unwrap_or_default(),
+                        read_only: depth.depthReadOnly,
                     },
-                };
-                let depth_channel = wgpu_com::PassChannel {
-                    load_op: depth_load_op,
-                    store_op: match depth.depthStoreOp {
-                        GPUStoreOp::Store => wgpu_com::StoreOp::Store,
-                        GPUStoreOp::Clear => wgpu_com::StoreOp::Clear,
+                    stencil: wgpu_com::PassChannel {
+                        load_op: convert_load_op(depth.stencilLoadOp),
+                        store_op: convert_store_op(depth.stencilStoreOp),
+                        clear_value: depth.stencilClearValue,
+                        read_only: depth.stencilReadOnly,
                     },
-                    clear_value: clear_depth,
-                    read_only: depth.depthReadOnly,
-                };
-                let stencil_channel = wgpu_com::PassChannel {
-                    load_op: stencil_load_op,
-                    store_op: match depth.stencilStoreOp {
-                        GPUStoreOp::Store => wgpu_com::StoreOp::Store,
-                        GPUStoreOp::Clear => wgpu_com::StoreOp::Clear,
-                    },
-                    clear_value: clear_stencil,
-                    read_only: depth.stencilReadOnly,
-                };
-                wgpu_com::DepthStencilAttachmentDescriptor {
-                    attachment: depth.attachment.id().0,
-                    depth: depth_channel,
-                    stencil: stencil_channel,
+                    view: depth.view.id().0,
                 }
             });
 
@@ -194,56 +188,54 @@ impl GPUCommandEncoderMethods for GPUCommandEncoder {
                         .colorAttachments
                         .iter()
                         .map(|color| {
-                            let (load_op, clear_value) = match color.loadValue {
-                                GPUColorLoad::GPULoadOp(_) => {
-                                    (wgpu_com::LoadOp::Load, wgt::Color::TRANSPARENT)
-                                },
-                                GPUColorLoad::DoubleSequence(ref s) => {
-                                    let mut w = s.clone();
-                                    if w.len() < 3 {
-                                        w.resize(3, Finite::wrap(0.0f64));
-                                    }
-                                    w.resize(4, Finite::wrap(1.0f64));
-                                    (
-                                        wgpu_com::LoadOp::Clear,
-                                        wgt::Color {
-                                            r: *w[0],
-                                            g: *w[1],
-                                            b: *w[2],
-                                            a: *w[3],
-                                        },
-                                    )
-                                },
-                                GPUColorLoad::GPUColorDict(ref d) => (
-                                    wgpu_com::LoadOp::Clear,
-                                    wgt::Color {
-                                        r: *d.r,
-                                        g: *d.g,
-                                        b: *d.b,
-                                        a: *d.a,
-                                    },
-                                ),
-                            };
                             let channel = wgpu_com::PassChannel {
-                                load_op,
-                                store_op: match color.storeOp {
-                                    GPUStoreOp::Store => wgpu_com::StoreOp::Store,
-                                    GPUStoreOp::Clear => wgpu_com::StoreOp::Clear,
+                                load_op: convert_load_op(Some(color.loadOp)),
+                                store_op: convert_store_op(Some(color.storeOp)),
+                                clear_value: if let Some(clear_val) = &color.clearValue {
+                                    match clear_val {
+                                        DoubleSequenceOrGPUColorDict::DoubleSequence(s) => {
+                                            let mut w = s.clone();
+                                            if w.len() < 3 {
+                                                w.resize(3, Finite::wrap(0.0f64));
+                                            }
+                                            w.resize(4, Finite::wrap(1.0f64));
+                                            wgt::Color {
+                                                r: *w[0],
+                                                g: *w[1],
+                                                b: *w[2],
+                                                a: *w[3],
+                                            }
+                                        },
+                                        DoubleSequenceOrGPUColorDict::GPUColorDict(d) => {
+                                            wgt::Color {
+                                                r: *d.r,
+                                                g: *d.g,
+                                                b: *d.b,
+                                                a: *d.a,
+                                            }
+                                        },
+                                    }
+                                } else {
+                                    wgt::Color::TRANSPARENT
                                 },
-                                clear_value,
                                 read_only: false,
                             };
-                            wgpu_com::ColorAttachmentDescriptor {
-                                attachment: color.attachment.id().0,
+                            Some(wgpu_com::RenderPassColorAttachment {
                                 resolve_target: color.resolveTarget.as_ref().map(|t| t.id().0),
                                 channel,
-                            }
+                                view: color.view.id().0,
+                            })
                         })
                         .collect::<Vec<_>>(),
                 ),
                 depth_stencil_attachment: depth_stencil.as_ref(),
+                label: descriptor
+                    .parent
+                    .label
+                    .as_ref()
+                    .map(|l| Cow::Borrowed(&**l)),
             };
-            Some(wgpu_com::RenderPass::new(self.encoder.0, desc))
+            Some(wgpu_com::RenderPass::new(self.encoder.0, &desc))
         };
 
         GPURenderPassEncoder::new(
@@ -251,7 +243,7 @@ impl GPUCommandEncoderMethods for GPUCommandEncoder {
             self.channel.clone(),
             render_pass,
             &self,
-            descriptor.parent.label.as_ref().cloned(),
+            descriptor.parent.label.clone().unwrap_or_default(),
         )
     }
 
@@ -292,8 +284,8 @@ impl GPUCommandEncoderMethods for GPUCommandEncoder {
     /// https://gpuweb.github.io/gpuweb/#dom-gpucommandencoder-copybuffertotexture
     fn CopyBufferToTexture(
         &self,
-        source: &GPUBufferCopyView,
-        destination: &GPUTextureCopyView,
+        source: &GPUImageCopyBuffer,
+        destination: &GPUImageCopyTexture,
         copy_size: GPUExtent3D,
     ) {
         if !(*self.state.borrow() == GPUCommandEncoderState::Open) {
@@ -311,8 +303,8 @@ impl GPUCommandEncoderMethods for GPUCommandEncoder {
                 None,
                 WebGPURequest::CopyBufferToTexture {
                     command_encoder_id: self.encoder.0,
-                    source: convert_buffer_cv(source),
-                    destination: convert_texture_cv(destination),
+                    source: convert_ic_buffer(source),
+                    destination: convert_ic_texture(destination),
                     copy_size: convert_texture_size_to_wgt(&convert_texture_size_to_dict(
                         &copy_size,
                     )),
@@ -321,11 +313,11 @@ impl GPUCommandEncoderMethods for GPUCommandEncoder {
             .expect("Failed to send CopyBufferToTexture");
     }
 
-    /// https://gpuweb.github.io/gpuweb/#GPUCommandEncoder-copyTextureToBuffer
+    /// https://gpuweb.github.io/gpuweb/#dom-gpucommandencoder-copybuffertotexture
     fn CopyTextureToBuffer(
         &self,
-        source: &GPUTextureCopyView,
-        destination: &GPUBufferCopyView,
+        source: &GPUImageCopyTexture,
+        destination: &GPUImageCopyBuffer,
         copy_size: GPUExtent3D,
     ) {
         if !(*self.state.borrow() == GPUCommandEncoderState::Open) {
@@ -343,8 +335,8 @@ impl GPUCommandEncoderMethods for GPUCommandEncoder {
                 None,
                 WebGPURequest::CopyTextureToBuffer {
                     command_encoder_id: self.encoder.0,
-                    source: convert_texture_cv(source),
-                    destination: convert_buffer_cv(destination),
+                    source: convert_ic_texture(source),
+                    destination: convert_ic_buffer(destination),
                     copy_size: convert_texture_size_to_wgt(&convert_texture_size_to_dict(
                         &copy_size,
                     )),
@@ -356,8 +348,8 @@ impl GPUCommandEncoderMethods for GPUCommandEncoder {
     /// https://gpuweb.github.io/gpuweb/#GPUCommandEncoder-copyTextureToTexture
     fn CopyTextureToTexture(
         &self,
-        source: &GPUTextureCopyView,
-        destination: &GPUTextureCopyView,
+        source: &GPUImageCopyTexture,
+        destination: &GPUImageCopyTexture,
         copy_size: GPUExtent3D,
     ) {
         if !(*self.state.borrow() == GPUCommandEncoderState::Open) {
@@ -371,8 +363,8 @@ impl GPUCommandEncoderMethods for GPUCommandEncoder {
                 None,
                 WebGPURequest::CopyTextureToTexture {
                     command_encoder_id: self.encoder.0,
-                    source: convert_texture_cv(source),
-                    destination: convert_texture_cv(destination),
+                    source: convert_ic_texture(source),
+                    destination: convert_ic_texture(destination),
                     copy_size: convert_texture_size_to_wgt(&convert_texture_size_to_dict(
                         &copy_size,
                     )),
@@ -404,24 +396,40 @@ impl GPUCommandEncoderMethods for GPUCommandEncoder {
             self.channel.clone(),
             buffer,
             self.buffers.borrow_mut().drain().collect(),
-            descriptor.parent.label.as_ref().cloned(),
+            descriptor.parent.label.clone().unwrap_or_default(),
         )
     }
 }
 
-fn convert_buffer_cv(buffer_cv: &GPUBufferCopyView) -> wgpu_com::BufferCopyView {
-    wgpu_com::BufferCopyView {
-        buffer: buffer_cv.buffer.id().0,
-        layout: convert_texture_data_layout(&buffer_cv.parent),
+fn convert_load_op(op: Option<GPULoadOp>) -> wgpu_com::LoadOp {
+    match op {
+        Some(GPULoadOp::Load) => wgpu_com::LoadOp::Load,
+        Some(GPULoadOp::Clear) => wgpu_com::LoadOp::Clear,
+        None => wgpu_com::LoadOp::Clear,
     }
 }
 
-pub fn convert_texture_cv(texture_cv: &GPUTextureCopyView) -> wgpu_com::TextureCopyView {
-    wgpu_com::TextureCopyView {
-        texture: texture_cv.texture.id().0,
-        mip_level: texture_cv.mipLevel,
-        origin: match texture_cv.origin {
-            GPUOrigin3D::RangeEnforcedUnsignedLongSequence(ref v) => {
+fn convert_store_op(op: Option<GPUStoreOp>) -> wgpu_com::StoreOp {
+    match op {
+        Some(GPUStoreOp::Store) => wgpu_com::StoreOp::Store,
+        Some(GPUStoreOp::Discard) => wgpu_com::StoreOp::Discard,
+        None => wgpu_com::StoreOp::Discard,
+    }
+}
+
+fn convert_ic_buffer(ic_buffer: &GPUImageCopyBuffer) -> wgpu_com::ImageCopyBuffer {
+    wgpu_com::ImageCopyBuffer {
+        buffer: ic_buffer.buffer.id().0,
+        layout: convert_image_data_layout(&ic_buffer.parent),
+    }
+}
+
+pub fn convert_ic_texture(ic_texture: &GPUImageCopyTexture) -> wgpu_com::ImageCopyTexture {
+    wgpu_com::ImageCopyTexture {
+        texture: ic_texture.texture.id().0,
+        mip_level: ic_texture.mipLevel,
+        origin: match ic_texture.origin {
+            Some(GPUOrigin3D::RangeEnforcedUnsignedLongSequence(ref v)) => {
                 let mut w = v.clone();
                 w.resize(3, 0);
                 wgt::Origin3d {
@@ -430,17 +438,23 @@ pub fn convert_texture_cv(texture_cv: &GPUTextureCopyView) -> wgpu_com::TextureC
                     z: w[2],
                 }
             },
-            GPUOrigin3D::GPUOrigin3DDict(ref d) => wgt::Origin3d {
+            Some(GPUOrigin3D::GPUOrigin3DDict(ref d)) => wgt::Origin3d {
                 x: d.x,
                 y: d.y,
                 z: d.z,
             },
+            None => wgt::Origin3d::default(),
+        },
+        aspect: match ic_texture.aspect {
+            GPUTextureAspect::All => wgt::TextureAspect::All,
+            GPUTextureAspect::Stencil_only => wgt::TextureAspect::StencilOnly,
+            GPUTextureAspect::Depth_only => wgt::TextureAspect::DepthOnly,
         },
     }
 }
 
-pub fn convert_texture_data_layout(data_layout: &GPUTextureDataLayout) -> wgt::TextureDataLayout {
-    wgt::TextureDataLayout {
+pub fn convert_image_data_layout(data_layout: &GPUImageDataLayout) -> wgt::ImageDataLayout {
+    wgt::ImageDataLayout {
         offset: data_layout.offset as wgt::BufferAddress,
         bytes_per_row: data_layout.bytesPerRow,
         rows_per_image: data_layout.rowsPerImage,

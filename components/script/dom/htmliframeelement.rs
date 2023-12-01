@@ -2,11 +2,30 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
+use std::cell::Cell;
+
+use bitflags::bitflags;
+use dom_struct::dom_struct;
+use html5ever::{local_name, namespace_url, ns, LocalName, Prefix};
+use ipc_channel::ipc;
+use js::rust::HandleObject;
+use msg::constellation_msg::{BrowsingContextId, PipelineId, TopLevelBrowsingContextId};
+use profile_traits::ipc as ProfiledIpc;
+use script_layout_interface::message::ReflowGoal;
+use script_traits::IFrameSandboxState::{IFrameSandboxed, IFrameUnsandboxed};
+use script_traits::{
+    HistoryEntryReplacement, IFrameLoadInfo, IFrameLoadInfoWithData, JsEvalResult, LoadData,
+    LoadOrigin, NewLayoutInfo, ScriptMsg, UpdatePipelineIdReason, WindowSizeData,
+};
+use servo_atoms::Atom;
+use servo_url::ServoUrl;
+use style::attr::{AttrValue, LengthOrPercentageOrAuto};
+
 use crate::document_loader::{LoadBlocker, LoadType};
 use crate::dom::attr::Attr;
 use crate::dom::bindings::cell::DomRefCell;
 use crate::dom::bindings::codegen::Bindings::HTMLIFrameElementBinding::HTMLIFrameElementMethods;
-use crate::dom::bindings::codegen::Bindings::WindowBinding::WindowBinding::WindowMethods;
+use crate::dom::bindings::codegen::Bindings::WindowBinding::Window_Binding::WindowMethods;
 use crate::dom::bindings::inheritance::Castable;
 use crate::dom::bindings::refcounted::Trusted;
 use crate::dom::bindings::reflector::DomObject;
@@ -25,27 +44,12 @@ use crate::dom::virtualmethods::VirtualMethods;
 use crate::dom::window::ReflowReason;
 use crate::dom::windowproxy::WindowProxy;
 use crate::script_thread::ScriptThread;
-use dom_struct::dom_struct;
-use html5ever::{LocalName, Prefix};
-use ipc_channel::ipc;
-use js::rust::HandleObject;
-use msg::constellation_msg::{BrowsingContextId, PipelineId, TopLevelBrowsingContextId};
-use profile_traits::ipc as ProfiledIpc;
-use script_layout_interface::message::ReflowGoal;
-use script_traits::IFrameSandboxState::{IFrameSandboxed, IFrameUnsandboxed};
-use script_traits::{
-    HistoryEntryReplacement, IFrameLoadInfo, IFrameLoadInfoWithData, JsEvalResult, LoadData,
-    LoadOrigin, UpdatePipelineIdReason, WindowSizeData,
-};
-use script_traits::{NewLayoutInfo, ScriptMsg};
-use servo_atoms::Atom;
-use servo_url::ServoUrl;
-use std::cell::Cell;
-use style::attr::{AttrValue, LengthOrPercentageOrAuto};
+
+#[derive(Clone, Copy, JSTraceable, MallocSizeOf)]
+struct SandboxAllowance(u8);
 
 bitflags! {
-    #[derive(JSTraceable, MallocSizeOf)]
-    struct SandboxAllowance: u8 {
+    impl SandboxAllowance: u8 {
         const ALLOW_NOTHING = 0x00;
         const ALLOW_SAME_ORIGIN = 0x01;
         const ALLOW_TOP_NAVIGATION = 0x02;
@@ -71,10 +75,15 @@ enum ProcessingMode {
 #[dom_struct]
 pub struct HTMLIFrameElement {
     htmlelement: HTMLElement,
+    #[no_trace]
     top_level_browsing_context_id: Cell<Option<TopLevelBrowsingContextId>>,
+    #[no_trace]
     browsing_context_id: Cell<Option<BrowsingContextId>>,
+    #[no_trace]
     pipeline_id: Cell<Option<PipelineId>>,
+    #[no_trace]
     pending_pipeline_id: Cell<Option<PipelineId>>,
+    #[no_trace]
     about_blank_pipeline_id: Cell<Option<PipelineId>>,
     sandbox: MutNullableDom<DOMTokenList>,
     sandbox_allowance: Cell<Option<SandboxAllowance>>,
@@ -437,7 +446,7 @@ impl HTMLIFrameElement {
         }
     }
 
-    #[allow(unrooted_must_root)]
+    #[allow(crown::unrooted_must_root)]
     pub fn new(
         local_name: LocalName,
         prefix: Option<Prefix>,

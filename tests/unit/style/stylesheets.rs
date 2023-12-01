@@ -2,11 +2,11 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
+use std::cell::RefCell;
+
 use cssparser::SourceLocation;
 use servo_arc::Arc;
-use servo_config::set_pref;
 use servo_url::ServoUrl;
-use std::cell::RefCell;
 use style::context::QuirksMode;
 use style::error_reporting::{ContextualParseError, ParseErrorReporter};
 use style::media_queries::MediaList;
@@ -119,7 +119,6 @@ fn test_report_error_stylesheet() {
         ), // FIXME: column should be around 56
         (10, 17, "Unsupported property declaration: 'invalid: true;'"),
         (12, 28, "Invalid media rule"),
-        (13, 30, "Unsupported @font-face descriptor declaration"),
         // When @counter-style is supported, this should be replaced with two errors
         (14, 19, "Invalid rule: '@counter-style "),
         // When @font-feature-values is supported, this should be replaced with two errors

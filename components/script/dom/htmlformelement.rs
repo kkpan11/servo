@@ -2,9 +2,30 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
+use std::borrow::ToOwned;
+use std::cell::Cell;
+
+use dom_struct::dom_struct;
+use encoding_rs::{Encoding, UTF_8};
+use headers::{ContentType, HeaderMapExt};
+use html5ever::{local_name, namespace_url, ns, LocalName, Prefix};
+use http::Method;
+use js::rust::HandleObject;
+use mime::{self, Mime};
+use net_traits::http_percent_encode;
+use net_traits::request::Referrer;
+use script_traits::{HistoryEntryReplacement, LoadData, LoadOrigin};
+use servo_atoms::Atom;
+use servo_rand::random;
+use style::attr::AttrValue;
+use style::str::split_html_space_chars;
+use style_traits::dom::ElementState;
+use time::{now, Duration, Tm};
+
+use super::bindings::trace::{HashMapTracedValues, NoTrace};
 use crate::body::Extractable;
 use crate::dom::bindings::cell::DomRefCell;
-use crate::dom::bindings::codegen::Bindings::AttrBinding::AttrBinding::AttrMethods;
+use crate::dom::bindings::codegen::Bindings::AttrBinding::Attr_Binding::AttrMethods;
 use crate::dom::bindings::codegen::Bindings::BlobBinding::BlobMethods;
 use crate::dom::bindings::codegen::Bindings::DocumentBinding::DocumentMethods;
 use crate::dom::bindings::codegen::Bindings::EventBinding::EventMethods;
@@ -14,8 +35,10 @@ use crate::dom::bindings::codegen::Bindings::HTMLFormControlsCollectionBinding::
 use crate::dom::bindings::codegen::Bindings::HTMLFormElementBinding::HTMLFormElementMethods;
 use crate::dom::bindings::codegen::Bindings::HTMLInputElementBinding::HTMLInputElementMethods;
 use crate::dom::bindings::codegen::Bindings::HTMLTextAreaElementBinding::HTMLTextAreaElementMethods;
+use crate::dom::bindings::codegen::Bindings::NodeBinding::{NodeConstants, NodeMethods};
 use crate::dom::bindings::codegen::Bindings::NodeListBinding::NodeListMethods;
-use crate::dom::bindings::codegen::Bindings::WindowBinding::WindowBinding::WindowMethods;
+use crate::dom::bindings::codegen::Bindings::WindowBinding::Window_Binding::WindowMethods;
+use crate::dom::bindings::codegen::UnionTypes::RadioNodeListOrElement;
 use crate::dom::bindings::error::{Error, Fallible};
 use crate::dom::bindings::inheritance::{Castable, ElementTypeId, HTMLElementTypeId, NodeTypeId};
 use crate::dom::bindings::refcounted::Trusted;
@@ -47,9 +70,10 @@ use crate::dom::htmlobjectelement::HTMLObjectElement;
 use crate::dom::htmloutputelement::HTMLOutputElement;
 use crate::dom::htmlselectelement::HTMLSelectElement;
 use crate::dom::htmltextareaelement::HTMLTextAreaElement;
-use crate::dom::node::{document_from_node, window_from_node};
-use crate::dom::node::{Node, NodeFlags};
-use crate::dom::node::{UnbindContext, VecPreOrderInsertionHelper};
+use crate::dom::node::{
+    document_from_node, window_from_node, Node, NodeFlags, UnbindContext,
+    VecPreOrderInsertionHelper,
+};
 use crate::dom::nodelist::{NodeList, RadioListMode};
 use crate::dom::radionodelist::RadioNodeList;
 use crate::dom::submitevent::SubmitEvent;
@@ -57,28 +81,6 @@ use crate::dom::validitystate::ValidationFlags;
 use crate::dom::virtualmethods::VirtualMethods;
 use crate::dom::window::Window;
 use crate::task_source::TaskSource;
-use dom_struct::dom_struct;
-use encoding_rs::{Encoding, UTF_8};
-use headers::{ContentType, HeaderMapExt};
-use html5ever::{LocalName, Prefix};
-use http::Method;
-use js::rust::HandleObject;
-use mime::{self, Mime};
-use net_traits::http_percent_encode;
-use net_traits::request::Referrer;
-use script_traits::{HistoryEntryReplacement, LoadData, LoadOrigin};
-use servo_atoms::Atom;
-use servo_rand::random;
-use std::borrow::ToOwned;
-use std::cell::Cell;
-use style::attr::AttrValue;
-use style::str::split_html_space_chars;
-
-use crate::dom::bindings::codegen::UnionTypes::RadioNodeListOrElement;
-use std::collections::HashMap;
-use time::{now, Duration, Tm};
-
-use crate::dom::bindings::codegen::Bindings::NodeBinding::{NodeConstants, NodeMethods};
 
 #[derive(Clone, Copy, JSTraceable, MallocSizeOf, PartialEq)]
 pub struct GenerationId(u32);
@@ -92,7 +94,7 @@ pub struct HTMLFormElement {
     elements: DomOnceCell<HTMLFormControlsCollection>,
     generation_id: Cell<GenerationId>,
     controls: DomRefCell<Vec<Dom<Element>>>,
-    past_names_map: DomRefCell<HashMap<Atom, (Dom<Element>, Tm)>>,
+    past_names_map: DomRefCell<HashMapTracedValues<Atom, (Dom<Element>, NoTrace<Tm>)>>,
     firing_submission_events: Cell<bool>,
     rel_list: MutNullableDom<DOMTokenList>,
 }
@@ -104,19 +106,24 @@ impl HTMLFormElement {
         document: &Document,
     ) -> HTMLFormElement {
         HTMLFormElement {
-            htmlelement: HTMLElement::new_inherited(local_name, prefix, document),
+            htmlelement: HTMLElement::new_inherited_with_state(
+                ElementState::VALID,
+                local_name,
+                prefix,
+                document,
+            ),
             marked_for_reset: Cell::new(false),
             constructing_entry_list: Cell::new(false),
             elements: Default::default(),
             generation_id: Cell::new(GenerationId(0)),
             controls: DomRefCell::new(Vec::new()),
-            past_names_map: DomRefCell::new(HashMap::new()),
+            past_names_map: DomRefCell::new(HashMapTracedValues::new()),
             firing_submission_events: Cell::new(false),
             rel_list: Default::default(),
         }
     }
 
-    #[allow(unrooted_must_root)]
+    #[allow(crown::unrooted_must_root)]
     pub fn new(
         local_name: LocalName,
         prefix: Option<Prefix>,
@@ -359,10 +366,10 @@ impl HTMLFormElementMethods for HTMLFormElement {
                             elem.downcast::<HTMLTextAreaElement>().unwrap().form_owner()
                         },
                         _ => {
-                            debug_assert!(
-                                !elem.downcast::<HTMLElement>().unwrap().is_listed_element() ||
-                                    elem.local_name() == &local_name!("keygen")
-                            );
+                            debug_assert!(!elem
+                                .downcast::<HTMLElement>()
+                                .unwrap()
+                                .is_listed_element());
                             return false;
                         },
                     },
@@ -435,7 +442,7 @@ impl HTMLFormElementMethods for HTMLFormElement {
             name,
             (
                 Dom::from_ref(&*element_node.downcast::<Element>().unwrap()),
-                now(),
+                NoTrace(now()),
             ),
         );
 
@@ -549,7 +556,7 @@ impl HTMLFormElementMethods for HTMLFormElement {
             let entry = SourcedName {
                 name: key.clone(),
                 element: DomRoot::from_ref(&*val.0),
-                source: SourcedNameSource::Past(now() - val.1), // calculate difference now()-val.1 to find age
+                source: SourcedNameSource::Past(now() - val.1 .0), // calculate difference now()-val.1 to find age
             };
             sourced_names_vec.push(entry);
         }
@@ -672,6 +679,23 @@ impl HTMLFormElement {
 
         // Step 3
         result
+    }
+
+    pub fn update_validity(&self) {
+        let controls = self.controls.borrow();
+
+        let is_any_invalid = controls
+            .iter()
+            .filter_map(|control| control.as_maybe_validatable())
+            .any(|validatable| {
+                validatable.is_instance_validatable() &&
+                    !validatable.validity_state().invalid_flags().is_empty()
+            });
+
+        self.upcast::<Element>()
+            .set_state(ElementState::VALID, !is_any_invalid);
+        self.upcast::<Element>()
+            .set_state(ElementState::INVALID, is_any_invalid);
     }
 
     /// [Form submission](https://html.spec.whatwg.org/multipage/#concept-form-submit)
@@ -1034,9 +1058,12 @@ impl HTMLFormElement {
                         Some(v) => v,
                         None => return None,
                     };
+                    validatable
+                        .validity_state()
+                        .perform_validation_and_update(ValidationFlags::all());
                     if !validatable.is_instance_validatable() {
                         None
-                    } else if validatable.validate(ValidationFlags::all()).is_empty() {
+                    } else if validatable.validity_state().invalid_flags().is_empty() {
                         None
                     } else {
                         Some(DomRoot::from_ref(el))
@@ -1260,11 +1287,6 @@ impl HTMLFormElement {
                 )) => {
                     child.downcast::<HTMLInputElement>().unwrap().reset();
                 },
-                // TODO HTMLKeygenElement unimplemented
-                //NodeTypeId::Element(ElementTypeId::HTMLElement(HTMLElementTypeId::HTMLKeygenElement)) => {
-                //    // Unimplemented
-                //    {}
-                //}
                 NodeTypeId::Element(ElementTypeId::HTMLElement(
                     HTMLElementTypeId::HTMLSelectElement,
                 )) => {
@@ -1287,27 +1309,32 @@ impl HTMLFormElement {
     }
 
     fn add_control<T: ?Sized + FormControl>(&self, control: &T) {
-        let root = self.upcast::<Element>().root_element();
-        let root = root.upcast::<Node>();
-
-        let mut controls = self.controls.borrow_mut();
-        controls.insert_pre_order(control.to_element(), root);
+        {
+            let root = self.upcast::<Element>().root_element();
+            let root = root.upcast::<Node>();
+            let mut controls = self.controls.borrow_mut();
+            controls.insert_pre_order(control.to_element(), root);
+        }
+        self.update_validity();
     }
 
     fn remove_control<T: ?Sized + FormControl>(&self, control: &T) {
-        let control = control.to_element();
-        let mut controls = self.controls.borrow_mut();
-        controls
-            .iter()
-            .position(|c| &**c == control)
-            .map(|idx| controls.remove(idx));
+        {
+            let control = control.to_element();
+            let mut controls = self.controls.borrow_mut();
+            controls
+                .iter()
+                .position(|c| &**c == control)
+                .map(|idx| controls.remove(idx));
 
-        // https://html.spec.whatwg.org/multipage#forms.html#the-form-element:past-names-map-5
-        // "If an element listed in a form element's past names map
-        // changes form owner, then its entries must be removed
-        // from that map."
-        let mut past_names_map = self.past_names_map.borrow_mut();
-        past_names_map.retain(|_k, v| v.0 != control);
+            // https://html.spec.whatwg.org/multipage#forms.html#the-form-element:past-names-map-5
+            // "If an element listed in a form element's past names map
+            // changes form owner, then its entries must be removed
+            // from that map."
+            let mut past_names_map = self.past_names_map.borrow_mut();
+            past_names_map.0.retain(|_k, v| v.0 != control);
+        }
+        self.update_validity();
     }
 }
 

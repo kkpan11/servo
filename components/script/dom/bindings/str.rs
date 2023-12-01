@@ -3,21 +3,21 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
 //! The `ByteString` struct.
+use std::borrow::{Borrow, Cow, ToOwned};
+use std::default::Default;
+use std::hash::{Hash, Hasher};
+use std::marker::PhantomData;
+use std::ops::{Deref, DerefMut};
+use std::str::FromStr;
+use std::{fmt, ops, str};
+
 use chrono::prelude::{Utc, Weekday};
 use chrono::{Datelike, TimeZone};
 use cssparser::CowRcStr;
 use html5ever::{LocalName, Namespace};
+use lazy_static::lazy_static;
 use regex::Regex;
 use servo_atoms::Atom;
-use std::borrow::{Borrow, Cow, ToOwned};
-use std::default::Default;
-use std::fmt;
-use std::hash::{Hash, Hasher};
-use std::marker::PhantomData;
-use std::ops;
-use std::ops::{Deref, DerefMut};
-use std::str;
-use std::str::FromStr;
 
 /// Encapsulates the IDL `ByteString` type.
 #[derive(Clone, Debug, Default, Eq, JSTraceable, MallocSizeOf, PartialEq)]
@@ -783,11 +783,14 @@ fn max_day_in_month(year_num: i32, month_num: u32) -> Result<u32, ()> {
 
 /// https://html.spec.whatwg.org/multipage/#week-number-of-the-last-day
 fn max_week_in_year(year: i32) -> u32 {
-    match Utc.ymd(year as i32, 1, 1).weekday() {
-        Weekday::Thu => 53,
-        Weekday::Wed if is_leap_year(year) => 53,
-        _ => 52,
-    }
+    Utc.with_ymd_and_hms(year as i32, 1, 1, 0, 0, 0)
+        .earliest()
+        .map(|date_time| match date_time.weekday() {
+            Weekday::Thu => 53,
+            Weekday::Wed if is_leap_year(year) => 53,
+            _ => 52,
+        })
+        .unwrap_or(52)
 }
 
 #[inline]

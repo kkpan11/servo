@@ -2,6 +2,13 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
+use std::default::Default;
+
+use dom_struct::dom_struct;
+use html5ever::{local_name, LocalName, Prefix};
+use js::rust::HandleObject;
+use style_traits::dom::ElementState;
+
 use crate::dom::attr::Attr;
 use crate::dom::bindings::codegen::Bindings::HTMLFieldSetElementBinding::HTMLFieldSetElementMethods;
 use crate::dom::bindings::inheritance::{Castable, ElementTypeId, HTMLElementTypeId, NodeTypeId};
@@ -17,11 +24,6 @@ use crate::dom::node::{window_from_node, Node, ShadowIncluding};
 use crate::dom::validation::Validatable;
 use crate::dom::validitystate::ValidityState;
 use crate::dom::virtualmethods::VirtualMethods;
-use dom_struct::dom_struct;
-use html5ever::{LocalName, Prefix};
-use js::rust::HandleObject;
-use std::default::Default;
-use style::element_state::ElementState;
 
 #[dom_struct]
 pub struct HTMLFieldSetElement {
@@ -38,7 +40,7 @@ impl HTMLFieldSetElement {
     ) -> HTMLFieldSetElement {
         HTMLFieldSetElement {
             htmlelement: HTMLElement::new_inherited_with_state(
-                ElementState::IN_ENABLED_STATE,
+                ElementState::ENABLED | ElementState::VALID,
                 local_name,
                 prefix,
                 document,
@@ -48,7 +50,7 @@ impl HTMLFieldSetElement {
         }
     }
 
-    #[allow(unrooted_must_root)]
+    #[allow(crown::unrooted_must_root)]
     pub fn new(
         local_name: LocalName,
         prefix: Option<Prefix>,
@@ -62,6 +64,26 @@ impl HTMLFieldSetElement {
             document,
             proto,
         )
+    }
+
+    pub fn update_validity(&self) {
+        let has_invalid_child = self
+            .upcast::<Node>()
+            .traverse_preorder(ShadowIncluding::No)
+            .flat_map(DomRoot::downcast::<Element>)
+            .any(|element| {
+                if let Some(validatable) = element.as_maybe_validatable() {
+                    validatable.is_instance_validatable() &&
+                        !validatable.validity_state().invalid_flags().is_empty()
+                } else {
+                    false
+                }
+            });
+
+        self.upcast::<Element>()
+            .set_state(ElementState::VALID, !has_invalid_child);
+        self.upcast::<Element>()
+            .set_state(ElementState::INVALID, has_invalid_child);
     }
 }
 

@@ -4,6 +4,21 @@
 
 //! CSS table formatting contexts.
 
+use std::fmt;
+
+use app_units::Au;
+use euclid::default::{Point2D, Rect, SideOffsets2D, Size2D};
+use gfx_traits::print_tree::PrintTree;
+use log::{debug, trace};
+use script_layout_interface::wrapper_traits::ThreadSafeLayoutNode;
+use serde::Serialize;
+use style::logical_geometry::{LogicalMargin, LogicalRect, LogicalSize, WritingMode};
+use style::properties::ComputedValues;
+use style::values::computed::length::Size;
+use style::values::computed::Color;
+use style::values::generics::box_::{VerticalAlign, VerticalAlignKeyword};
+use style::values::specified::BorderStyle;
+
 use crate::block::{BlockFlow, ISizeAndMarginsComputer, MarginsMayCollapseFlag};
 use crate::context::LayoutContext;
 use crate::display_list::{
@@ -11,20 +26,9 @@ use crate::display_list::{
 };
 use crate::flow::{Flow, FlowClass, FlowFlags, GetBaseFlow, OpaqueFlow};
 use crate::fragment::{Fragment, FragmentBorderBoxIterator, Overflow};
-use crate::layout_debug;
 use crate::table::InternalTable;
 use crate::table_row::{CollapsedBorder, CollapsedBorderProvenance};
-use app_units::Au;
-use euclid::default::{Point2D, Rect, SideOffsets2D, Size2D};
-use gfx_traits::print_tree::PrintTree;
-use script_layout_interface::wrapper_traits::ThreadSafeLayoutNode;
-use std::fmt;
-use style::logical_geometry::{LogicalMargin, LogicalRect, LogicalSize, WritingMode};
-use style::properties::ComputedValues;
-use style::values::computed::length::Size;
-use style::values::computed::Color;
-use style::values::generics::box_::{VerticalAlign, VerticalAlignKeyword};
-use style::values::specified::BorderStyle;
+use crate::{layout_debug, layout_debug_scope};
 
 #[allow(unsafe_code)]
 unsafe impl crate::flow::HasBaseFlow for TableCellFlow {}
@@ -375,7 +379,7 @@ impl fmt::Debug for TableCellFlow {
     }
 }
 
-#[derive(Clone, Copy, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize)]
 pub struct CollapsedBordersForCell {
     pub inline_start_border: CollapsedBorder,
     pub inline_end_border: CollapsedBorder,
@@ -494,10 +498,10 @@ impl CollapsedBordersForCell {
     ) {
         let logical_border_colors = LogicalMargin::new(
             writing_mode,
-            self.block_start_border.color,
-            self.inline_end_border.color,
-            self.block_end_border.color,
-            self.inline_start_border.color,
+            self.block_start_border.color.clone(),
+            self.inline_end_border.color.clone(),
+            self.block_end_border.color.clone(),
+            self.inline_start_border.color.clone(),
         );
         *border_colors = logical_border_colors.to_physical(writing_mode);
 

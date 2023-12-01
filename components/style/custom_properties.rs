@@ -64,6 +64,31 @@ fn get_safearea_inset_right(device: &Device) -> VariableValue {
     VariableValue::pixels(device.safe_area_insets().right)
 }
 
+#[cfg(feature = "gecko")]
+fn get_content_preferred_color_scheme(device: &Device) -> VariableValue {
+    use crate::gecko::media_features::PrefersColorScheme;
+    let prefers_color_scheme = unsafe {
+        crate::gecko_bindings::bindings::Gecko_MediaFeatures_PrefersColorScheme(
+            device.document(),
+            /* use_content = */ true,
+        )
+    };
+    VariableValue::ident(match prefers_color_scheme {
+        PrefersColorScheme::Light => "light",
+        PrefersColorScheme::Dark => "dark",
+    })
+}
+
+#[cfg(feature = "servo")]
+fn get_content_preferred_color_scheme(_device: &Device) -> VariableValue {
+    // TODO: implement this.
+    VariableValue::ident("light")
+}
+
+fn get_scrollbar_inline_size(device: &Device) -> VariableValue {
+    VariableValue::pixels(device.scrollbar_inline_size().px())
+}
+
 static ENVIRONMENT_VARIABLES: [EnvironmentVariable; 4] = [
     make_variable!(atom!("safe-area-inset-top"), get_safearea_inset_top),
     make_variable!(atom!("safe-area-inset-bottom"), get_safearea_inset_bottom),
@@ -99,13 +124,12 @@ macro_rules! lnf_int_variable {
     }};
 }
 
-static CHROME_ENVIRONMENT_VARIABLES: [EnvironmentVariable; 5] = [
+static CHROME_ENVIRONMENT_VARIABLES: [EnvironmentVariable; 6] = [
     lnf_int_variable!(
         atom!("-moz-gtk-csd-titlebar-radius"),
         TitlebarRadius,
         int_pixels
     ),
-    lnf_int_variable!(atom!("-moz-gtk-csd-menu-radius"), GtkMenuRadius, int_pixels),
     lnf_int_variable!(
         atom!("-moz-gtk-csd-close-button-position"),
         GTKCSDCloseButtonPosition,
@@ -121,6 +145,11 @@ static CHROME_ENVIRONMENT_VARIABLES: [EnvironmentVariable; 5] = [
         GTKCSDMaximizeButtonPosition,
         integer
     ),
+    make_variable!(
+        atom!("-moz-content-preferred-color-scheme"),
+        get_content_preferred_color_scheme
+    ),
+    make_variable!(atom!("scrollbar-inline-size"), get_scrollbar_inline_size),
 ];
 
 impl CssEnvironment {
@@ -129,7 +158,7 @@ impl CssEnvironment {
         if let Some(var) = ENVIRONMENT_VARIABLES.iter().find(|var| var.name == *name) {
             return Some((var.evaluator)(device));
         }
-        if !device.is_chrome_document() {
+        if !device.chrome_rules_enabled_for_document() {
             return None;
         }
         let var = CHROME_ENVIRONMENT_VARIABLES
@@ -326,6 +355,11 @@ impl VariableValue {
             value: number as f32,
             int_value: Some(number),
         })
+    }
+
+    /// Create VariableValue from an int.
+    fn ident(ident: &'static str) -> Self {
+        Self::from_token(Token::Ident(ident.into()))
     }
 
     /// Create VariableValue from a float amount of CSS pixels.
@@ -772,7 +806,11 @@ impl<'a> CustomPropertiesBuilder<'a> {
 /// (meaning we should use the inherited value).
 ///
 /// It does cycle dependencies removal at the same time as substitution.
-fn substitute_all(custom_properties_map: &mut CustomPropertiesMap, seen: &PrecomputedHashSet<&Name>, device: &Device) {
+fn substitute_all(
+    custom_properties_map: &mut CustomPropertiesMap,
+    seen: &PrecomputedHashSet<&Name>,
+    device: &Device,
+) {
     // The cycle dependencies removal in this function is a variant
     // of Tarjan's algorithm. It is mostly based on the pseudo-code
     // listed in

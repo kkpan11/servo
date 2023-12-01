@@ -2,7 +2,6 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
-use crate::display_list::ToLayout;
 use app_units::Au;
 use euclid::default::{Point2D, Size2D, Vector2D};
 use style::properties::ComputedValues;
@@ -10,6 +9,8 @@ use style::values::computed::image::{EndingShape, LineDirection};
 use style::values::computed::{Angle, Color, LengthPercentage, Percentage, Position};
 use style::values::generics::image::{Circle, ColorStop, Ellipse, GradientItem, ShapeExtent};
 use webrender_api::{ExtendMode, Gradient, GradientBuilder, GradientStop, RadialGradient};
+
+use crate::display_list::ToLayout;
 
 /// A helper data structure for gradients.
 #[derive(Clone, Copy)]
@@ -86,7 +87,7 @@ fn convert_gradient_stops(
     // Only keep the color stops, discard the color interpolation hints.
     let mut stop_items = gradient_items
         .iter()
-        .filter_map(|item| match *item {
+        .filter_map(|item| match item {
             GradientItem::SimpleColorStop(color) => Some(ColorStop {
                 color,
                 position: None,
@@ -191,7 +192,7 @@ fn convert_gradient_stops(
         assert!(offset.is_finite());
         stops.push(GradientStop {
             offset: offset,
-            color: style.resolve_color(stop.color).to_layout(),
+            color: style.resolve_color(stop.color.clone()).to_layout(),
         })
     }
     stops

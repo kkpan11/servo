@@ -2,12 +2,23 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
-#![allow(unrooted_must_root)]
+#![allow(crown::unrooted_must_root)]
+
+use std::io;
+
+use html5ever::buffer_queue::BufferQueue;
+use html5ever::serialize::TraversalScope::IncludeNode;
+use html5ever::serialize::{AttrRef, Serialize, Serializer, TraversalScope};
+use html5ever::tokenizer::{Tokenizer as HtmlTokenizer, TokenizerOpts, TokenizerResult};
+use html5ever::tree_builder::{Tracer as HtmlTracer, TreeBuilder, TreeBuilderOpts};
+use html5ever::QualName;
+use js::jsapi::JSTracer;
+use servo_url::ServoUrl;
 
 use crate::dom::bindings::codegen::Bindings::HTMLTemplateElementBinding::HTMLTemplateElementMethods;
 use crate::dom::bindings::inheritance::{Castable, CharacterDataTypeId, NodeTypeId};
 use crate::dom::bindings::root::{Dom, DomRoot};
-use crate::dom::bindings::trace::JSTraceable;
+use crate::dom::bindings::trace::{CustomTraceable, JSTraceable};
 use crate::dom::characterdata::CharacterData;
 use crate::dom::document::Document;
 use crate::dom::documentfragment::DocumentFragment;
@@ -18,19 +29,9 @@ use crate::dom::htmltemplateelement::HTMLTemplateElement;
 use crate::dom::node::Node;
 use crate::dom::processinginstruction::ProcessingInstruction;
 use crate::dom::servoparser::{ParsingAlgorithm, Sink};
-use html5ever::buffer_queue::BufferQueue;
-use html5ever::serialize::TraversalScope;
-use html5ever::serialize::TraversalScope::IncludeNode;
-use html5ever::serialize::{AttrRef, Serialize, Serializer};
-use html5ever::tokenizer::{Tokenizer as HtmlTokenizer, TokenizerOpts, TokenizerResult};
-use html5ever::tree_builder::{Tracer as HtmlTracer, TreeBuilder, TreeBuilderOpts};
-use html5ever::QualName;
-use js::jsapi::JSTracer;
-use servo_url::ServoUrl;
-use std::io;
 
 #[derive(JSTraceable, MallocSizeOf)]
-#[unrooted_must_root_lint::must_root]
+#[crown::unrooted_must_root_lint::must_root]
 pub struct Tokenizer {
     #[ignore_malloc_size_of = "Defined in html5ever"]
     inner: HtmlTokenizer<TreeBuilder<Dom<Node>, Sink>>,
@@ -101,14 +102,14 @@ impl Tokenizer {
 }
 
 #[allow(unsafe_code)]
-unsafe impl JSTraceable for HtmlTokenizer<TreeBuilder<Dom<Node>, Sink>> {
+unsafe impl CustomTraceable for HtmlTokenizer<TreeBuilder<Dom<Node>, Sink>> {
     unsafe fn trace(&self, trc: *mut JSTracer) {
         struct Tracer(*mut JSTracer);
         let tracer = Tracer(trc);
 
         impl HtmlTracer for Tracer {
             type Handle = Dom<Node>;
-            #[allow(unrooted_must_root)]
+            #[allow(crown::unrooted_must_root)]
             fn trace_handle(&self, node: &Dom<Node>) {
                 unsafe {
                     node.trace(self.0);

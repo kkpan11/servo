@@ -2,16 +2,23 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
+use std::rc::Rc;
+
+use dom_struct::dom_struct;
+use embedder_traits::{MediaMetadata as EmbedderMediaMetadata, MediaSessionEvent};
+use script_traits::{MediaSessionActionType, ScriptMsg};
+
+use super::bindings::trace::HashMapTracedValues;
 use crate::dom::bindings::callback::ExceptionHandling;
 use crate::dom::bindings::cell::DomRefCell;
 use crate::dom::bindings::codegen::Bindings::HTMLMediaElementBinding::HTMLMediaElementMethods;
-use crate::dom::bindings::codegen::Bindings::MediaMetadataBinding::MediaMetadataInit;
-use crate::dom::bindings::codegen::Bindings::MediaMetadataBinding::MediaMetadataMethods;
-use crate::dom::bindings::codegen::Bindings::MediaSessionBinding::MediaPositionState;
-use crate::dom::bindings::codegen::Bindings::MediaSessionBinding::MediaSessionAction;
-use crate::dom::bindings::codegen::Bindings::MediaSessionBinding::MediaSessionActionHandler;
-use crate::dom::bindings::codegen::Bindings::MediaSessionBinding::MediaSessionMethods;
-use crate::dom::bindings::codegen::Bindings::MediaSessionBinding::MediaSessionPlaybackState;
+use crate::dom::bindings::codegen::Bindings::MediaMetadataBinding::{
+    MediaMetadataInit, MediaMetadataMethods,
+};
+use crate::dom::bindings::codegen::Bindings::MediaSessionBinding::{
+    MediaPositionState, MediaSessionAction, MediaSessionActionHandler, MediaSessionMethods,
+    MediaSessionPlaybackState,
+};
 use crate::dom::bindings::error::{Error, Fallible};
 use crate::dom::bindings::num::Finite;
 use crate::dom::bindings::reflector::{reflect_dom_object, DomObject, Reflector};
@@ -21,38 +28,33 @@ use crate::dom::htmlmediaelement::HTMLMediaElement;
 use crate::dom::mediametadata::MediaMetadata;
 use crate::dom::window::Window;
 use crate::realms::{enter_realm, InRealm};
-use dom_struct::dom_struct;
-use embedder_traits::MediaMetadata as EmbedderMediaMetadata;
-use embedder_traits::MediaSessionEvent;
-use script_traits::MediaSessionActionType;
-use script_traits::ScriptMsg;
-use std::collections::HashMap;
-use std::rc::Rc;
 
 #[dom_struct]
 pub struct MediaSession {
     reflector_: Reflector,
     /// https://w3c.github.io/mediasession/#dom-mediasession-metadata
     #[ignore_malloc_size_of = "defined in embedder_traits"]
+    #[no_trace]
     metadata: DomRefCell<Option<EmbedderMediaMetadata>>,
     /// https://w3c.github.io/mediasession/#dom-mediasession-playbackstate
     playback_state: DomRefCell<MediaSessionPlaybackState>,
     /// https://w3c.github.io/mediasession/#supported-media-session-actions
     #[ignore_malloc_size_of = "Rc"]
-    action_handlers: DomRefCell<HashMap<MediaSessionActionType, Rc<MediaSessionActionHandler>>>,
+    action_handlers:
+        DomRefCell<HashMapTracedValues<MediaSessionActionType, Rc<MediaSessionActionHandler>>>,
     /// The media instance controlled by this media session.
     /// For now only HTMLMediaElements are controlled by media sessions.
     media_instance: MutNullableDom<HTMLMediaElement>,
 }
 
 impl MediaSession {
-    #[allow(unrooted_must_root)]
+    #[allow(crown::unrooted_must_root)]
     fn new_inherited() -> MediaSession {
         let media_session = MediaSession {
             reflector_: Reflector::new(),
             metadata: DomRefCell::new(None),
             playback_state: DomRefCell::new(MediaSessionPlaybackState::None),
-            action_handlers: DomRefCell::new(HashMap::new()),
+            action_handlers: DomRefCell::new(HashMapTracedValues::new()),
             media_instance: Default::default(),
         };
         media_session

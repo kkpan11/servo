@@ -2,6 +2,12 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
+use dom_struct::dom_struct;
+use js::rust::HandleObject;
+use servo_media::audio::node::AudioNodeInit;
+use servo_media::audio::param::ParamType;
+use servo_media::audio::stereo_panner::StereoPannerOptions as ServoMediaStereoPannerOptions;
+
 use crate::dom::audioparam::AudioParam;
 use crate::dom::audioscheduledsourcenode::AudioScheduledSourceNode;
 use crate::dom::baseaudiocontext::BaseAudioContext;
@@ -9,17 +15,13 @@ use crate::dom::bindings::codegen::Bindings::AudioNodeBinding::{
     ChannelCountMode, ChannelInterpretation,
 };
 use crate::dom::bindings::codegen::Bindings::AudioParamBinding::AutomationRate;
-use crate::dom::bindings::codegen::Bindings::StereoPannerNodeBinding::StereoPannerNodeMethods;
-use crate::dom::bindings::codegen::Bindings::StereoPannerNodeBinding::StereoPannerOptions;
+use crate::dom::bindings::codegen::Bindings::StereoPannerNodeBinding::{
+    StereoPannerNodeMethods, StereoPannerOptions,
+};
 use crate::dom::bindings::error::{Error, Fallible};
 use crate::dom::bindings::reflector::reflect_dom_object_with_proto;
 use crate::dom::bindings::root::{Dom, DomRoot};
 use crate::dom::window::Window;
-use dom_struct::dom_struct;
-use js::rust::HandleObject;
-use servo_media::audio::node::AudioNodeInit;
-use servo_media::audio::param::ParamType;
-use servo_media::audio::stereo_panner::StereoPannerOptions as ServoMediaStereoPannerOptions;
 
 #[dom_struct]
 pub struct StereoPannerNode {
@@ -28,7 +30,7 @@ pub struct StereoPannerNode {
 }
 
 impl StereoPannerNode {
-    #[allow(unrooted_must_root)]
+    #[allow(crown::unrooted_must_root)]
     pub fn new_inherited(
         window: &Window,
         context: &BaseAudioContext,
@@ -78,7 +80,7 @@ impl StereoPannerNode {
         Self::new_with_proto(window, None, context, options)
     }
 
-    #[allow(unrooted_must_root)]
+    #[allow(crown::unrooted_must_root)]
     fn new_with_proto(
         window: &Window,
         proto: Option<HandleObject>,

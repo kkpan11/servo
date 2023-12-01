@@ -7,8 +7,6 @@
 # option. This file may not be copied, modified, or distributed
 # except according to those terms.
 
-from __future__ import absolute_import, print_function, unicode_literals
-
 import hashlib
 import os
 import os.path
@@ -25,29 +23,8 @@ import six
 from io import BufferedIOBase, BytesIO
 from socket import error as socket_error
 
-try:
-    from ssl import HAS_SNI
-except ImportError:
-    HAS_SNI = False
-
 SCRIPT_PATH = os.path.abspath(os.path.dirname(__file__))
 SERVO_ROOT = os.path.abspath(os.path.join(SCRIPT_PATH, "..", ".."))
-HAS_SNI_AND_RECENT_PYTHON = HAS_SNI and sys.version_info >= (2, 7, 9)
-
-
-def get_static_rust_lang_org_dist():
-    if HAS_SNI_AND_RECENT_PYTHON:
-        return "https://static.rust-lang.org/dist"
-
-    return "https://static-rust-lang-org.s3.amazonaws.com/dist"
-
-
-def get_urlopen_kwargs():
-    # The cafile parameter was added in 2.7.9
-    if HAS_SNI_AND_RECENT_PYTHON:
-        import certifi
-        return {"cafile": certifi.where()}
-    return {}
 
 
 def remove_readonly(func, path, _):
@@ -74,7 +51,7 @@ def download(description: str, url: str, writer: BufferedIOBase, start_byte: int
         req = urllib.request.Request(url)
         if start_byte:
             req = urllib.request.Request(url, headers={'Range': 'bytes={}-'.format(start_byte)})
-        resp = urllib.request.urlopen(req, **get_urlopen_kwargs())
+        resp = urllib.request.urlopen(req)
 
         fsize = None
         if resp.info().get('Content-Length'):

@@ -2,7 +2,15 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
-use crate::dom::bindings::codegen::Bindings::EventBinding::EventBinding::EventMethods;
+use std::cell::Cell;
+use std::default::Default;
+
+use dom_struct::dom_struct;
+use euclid::default::Point2D;
+use js::rust::HandleObject;
+use servo_config::pref;
+
+use crate::dom::bindings::codegen::Bindings::EventBinding::Event_Binding::EventMethods;
 use crate::dom::bindings::codegen::Bindings::MouseEventBinding;
 use crate::dom::bindings::codegen::Bindings::MouseEventBinding::MouseEventMethods;
 use crate::dom::bindings::codegen::Bindings::UIEventBinding::UIEventMethods;
@@ -16,12 +24,6 @@ use crate::dom::eventtarget::EventTarget;
 use crate::dom::node::Node;
 use crate::dom::uievent::UIEvent;
 use crate::dom::window::Window;
-use dom_struct::dom_struct;
-use euclid::default::Point2D;
-use js::rust::HandleObject;
-use servo_config::pref;
-use std::cell::Cell;
-use std::default::Default;
 
 #[dom_struct]
 pub struct MouseEvent {
@@ -43,6 +45,7 @@ pub struct MouseEvent {
     button: Cell<i16>,
     buttons: Cell<u16>,
     related_target: MutNullableDom<EventTarget>,
+    #[no_trace]
     point_in_target: Cell<Option<Point2D<f32>>>,
 }
 

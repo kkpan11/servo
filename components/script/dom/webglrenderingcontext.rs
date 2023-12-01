@@ -2,18 +2,54 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
+use std::cell::Cell;
+use std::cmp;
+use std::ptr::{self, NonNull};
+use std::rc::Rc;
+
+#[cfg(feature = "webgl_backtrace")]
+use backtrace::Backtrace;
+use bitflags::bitflags;
+use canvas_traits::webgl::WebGLError::*;
+use canvas_traits::webgl::{
+    webgl_channel, AlphaTreatment, GLContextAttributes, GLLimits, GlType, Parameter, SizedDataType,
+    TexDataType, TexFormat, TexParameter, WebGLChan, WebGLCommand, WebGLCommandBacktrace,
+    WebGLContextId, WebGLError, WebGLFramebufferBindingRequest, WebGLMsg, WebGLMsgSender,
+    WebGLProgramId, WebGLResult, WebGLSLVersion, WebGLSendResult, WebGLSender, WebGLVersion,
+    YAxisTreatment,
+};
+use dom_struct::dom_struct;
+use euclid::default::{Point2D, Rect, Size2D};
+use ipc_channel::ipc::{self, IpcSharedMemory};
+use js::jsapi::{JSContext, JSObject, Type};
+use js::jsval::{
+    BooleanValue, DoubleValue, Int32Value, JSVal, NullValue, ObjectValue, UInt32Value,
+    UndefinedValue,
+};
+use js::rust::CustomAutoRooterGuard;
+use js::typedarray::{
+    ArrayBufferView, CreateWith, Float32, Float32Array, Int32, Int32Array, TypedArray,
+    TypedArrayElementCreator, Uint32Array,
+};
+use net_traits::image_cache::ImageResponse;
+use pixels::{self, PixelFormat};
+use script_layout_interface::HTMLCanvasDataSource;
+use serde::{Deserialize, Serialize};
+use servo_config::pref;
+use webrender_api::ImageKey;
+
 use crate::dom::bindings::cell::{DomRefCell, Ref, RefMut};
 use crate::dom::bindings::codegen::Bindings::ANGLEInstancedArraysBinding::ANGLEInstancedArraysConstants;
 use crate::dom::bindings::codegen::Bindings::EXTBlendMinmaxBinding::EXTBlendMinmaxConstants;
 use crate::dom::bindings::codegen::Bindings::OESVertexArrayObjectBinding::OESVertexArrayObjectConstants;
 use crate::dom::bindings::codegen::Bindings::WebGL2RenderingContextBinding::WebGL2RenderingContextConstants;
-use crate::dom::bindings::codegen::Bindings::WebGLRenderingContextBinding::TexImageSource;
-use crate::dom::bindings::codegen::Bindings::WebGLRenderingContextBinding::WebGLContextAttributes;
-use crate::dom::bindings::codegen::Bindings::WebGLRenderingContextBinding::WebGLRenderingContextConstants as constants;
-use crate::dom::bindings::codegen::Bindings::WebGLRenderingContextBinding::WebGLRenderingContextMethods;
-use crate::dom::bindings::codegen::UnionTypes::ArrayBufferViewOrArrayBuffer;
-use crate::dom::bindings::codegen::UnionTypes::Float32ArrayOrUnrestrictedFloatSequence;
-use crate::dom::bindings::codegen::UnionTypes::Int32ArrayOrLongSequence;
+use crate::dom::bindings::codegen::Bindings::WebGLRenderingContextBinding::{
+    TexImageSource, WebGLContextAttributes, WebGLRenderingContextConstants as constants,
+    WebGLRenderingContextMethods,
+};
+use crate::dom::bindings::codegen::UnionTypes::{
+    ArrayBufferViewOrArrayBuffer, Float32ArrayOrUnrestrictedFloatSequence, Int32ArrayOrLongSequence,
+};
 use crate::dom::bindings::conversions::{DerivedFrom, ToJSValConvertible};
 use crate::dom::bindings::error::{Error, ErrorResult, Fallible};
 use crate::dom::bindings::inheritance::Castable;
@@ -22,8 +58,9 @@ use crate::dom::bindings::root::{Dom, DomOnceCell, DomRoot, LayoutDom, MutNullab
 use crate::dom::bindings::str::DOMString;
 use crate::dom::element::cors_setting_for_element;
 use crate::dom::event::{Event, EventBubbles, EventCancelable};
-use crate::dom::htmlcanvaselement::utils as canvas_utils;
-use crate::dom::htmlcanvaselement::{HTMLCanvasElement, LayoutCanvasRenderingContextHelpers};
+use crate::dom::htmlcanvaselement::{
+    utils as canvas_utils, HTMLCanvasElement, LayoutCanvasRenderingContextHelpers,
+};
 use crate::dom::node::{document_from_node, window_from_node, Node, NodeDamage};
 use crate::dom::promise::Promise;
 use crate::dom::vertexarrayobject::VertexAttribData;
@@ -52,38 +89,6 @@ use crate::dom::webglvertexarrayobject::WebGLVertexArrayObject;
 use crate::dom::webglvertexarrayobjectoes::WebGLVertexArrayObjectOES;
 use crate::dom::window::Window;
 use crate::script_runtime::JSContext as SafeJSContext;
-#[cfg(feature = "webgl_backtrace")]
-use backtrace::Backtrace;
-use canvas_traits::webgl::WebGLError::*;
-use canvas_traits::webgl::{
-    webgl_channel, AlphaTreatment, GLContextAttributes, GLLimits, GlType, Parameter, SizedDataType,
-    TexDataType, TexFormat, TexParameter, WebGLChan, WebGLCommand, WebGLCommandBacktrace,
-    WebGLContextId, WebGLError, WebGLFramebufferBindingRequest, WebGLMsg, WebGLMsgSender,
-    WebGLProgramId, WebGLResult, WebGLSLVersion, WebGLSendResult, WebGLSender, WebGLVersion,
-    YAxisTreatment,
-};
-use dom_struct::dom_struct;
-use embedder_traits::EventLoopWaker;
-use euclid::default::{Point2D, Rect, Size2D};
-use ipc_channel::ipc::{self, IpcSharedMemory};
-use js::jsapi::{JSContext, JSObject, Type};
-use js::jsval::{BooleanValue, DoubleValue, Int32Value, JSVal, UInt32Value};
-use js::jsval::{NullValue, ObjectValue, UndefinedValue};
-use js::rust::CustomAutoRooterGuard;
-use js::typedarray::{
-    ArrayBufferView, CreateWith, Float32, Float32Array, Int32, Int32Array, Uint32Array,
-};
-use js::typedarray::{TypedArray, TypedArrayElementCreator};
-use net_traits::image_cache::ImageResponse;
-use pixels::{self, PixelFormat};
-use script_layout_interface::HTMLCanvasDataSource;
-use serde::{Deserialize, Serialize};
-use servo_config::pref;
-use std::cell::Cell;
-use std::cmp;
-use std::ptr::{self, NonNull};
-use std::rc::Rc;
-use webrender_api::ImageKey;
 
 // From the GLES 2.0.25 spec, page 85:
 //
@@ -137,10 +142,12 @@ where
     ObjectValue(rval.get())
 }
 
+/// Set of bitflags for texture unpacking (texImage2d, etc...)
+#[derive(Clone, Copy, JSTraceable, MallocSizeOf)]
+struct TextureUnpacking(u8);
+
 bitflags! {
-    /// Set of bitflags for texture unpacking (texImage2d, etc...)
-    #[derive(JSTraceable, MallocSizeOf)]
-    struct TextureUnpacking: u8 {
+    impl TextureUnpacking: u8 {
         const FLIP_Y_AXIS = 0x01;
         const PREMULTIPLY_ALPHA = 0x02;
         const CONVERT_COLORSPACE = 0x04;
@@ -166,13 +173,18 @@ pub struct WebGLRenderingContext {
     #[ignore_malloc_size_of = "Channels are hard"]
     webgl_sender: WebGLMessageSender,
     #[ignore_malloc_size_of = "Defined in webrender"]
+    #[no_trace]
     webrender_image: ImageKey,
+    #[no_trace]
     webgl_version: WebGLVersion,
+    #[no_trace]
     glsl_version: WebGLSLVersion,
     #[ignore_malloc_size_of = "Defined in surfman"]
+    #[no_trace]
     limits: GLLimits,
     canvas: Dom<HTMLCanvasElement>,
     #[ignore_malloc_size_of = "Defined in canvas_traits"]
+    #[no_trace]
     last_error: Cell<Option<WebGLError>>,
     texture_packing_alignment: Cell<u8>,
     texture_unpacking_settings: Cell<TextureUnpacking>,
@@ -190,6 +202,7 @@ pub struct WebGLRenderingContext {
     current_scissor: Cell<(i32, i32, u32, u32)>,
     #[ignore_malloc_size_of = "Because it's small"]
     current_clear_color: Cell<(f32, f32, f32, f32)>,
+    #[no_trace]
     size: Cell<Size2D<u32>>,
     extension_manager: WebGLExtensions,
     capabilities: Capabilities,
@@ -198,6 +211,7 @@ pub struct WebGLRenderingContext {
     default_vao_webgl2: DomOnceCell<WebGLVertexArrayObject>,
     current_vao_webgl2: MutNullableDom<WebGLVertexArrayObject>,
     textures: Textures,
+    #[no_trace]
     api_type: GlType,
 }
 
@@ -229,10 +243,7 @@ impl WebGLRenderingContext {
             let max_vertex_attribs = ctx_data.limits.max_vertex_attribs as usize;
             Self {
                 reflector_: Reflector::new(),
-                webgl_sender: WebGLMessageSender::new(
-                    ctx_data.sender,
-                    window.get_event_loop_waker(),
-                ),
+                webgl_sender: WebGLMessageSender::new(ctx_data.sender),
                 webrender_image: ctx_data.image_key,
                 webgl_version,
                 glsl_version: ctx_data.glsl_version,
@@ -271,7 +282,7 @@ impl WebGLRenderingContext {
         })
     }
 
-    #[allow(unrooted_must_root)]
+    #[allow(crown::unrooted_must_root)]
     pub fn new(
         window: &Window,
         canvas: &HTMLCanvasElement,
@@ -4700,12 +4711,14 @@ macro_rules! capabilities {
         capabilities!($name, $next, $($rest,)* [$name = 1;]);
     };
     ($prev:ident, $name:ident, $($rest:ident,)* [$($tt:tt)*]) => {
-        capabilities!($name, $($rest,)* [$($tt)* $name = Self::$prev.bits << 1;]);
+        capabilities!($name, $($rest,)* [$($tt)* $name = Self::$prev.bits() << 1;]);
     };
     ($prev:ident, [$($name:ident = $value:expr;)*]) => {
+        #[derive(Clone, Copy, JSTraceable, MallocSizeOf)]
+        pub struct CapFlags(u16);
+
         bitflags! {
-            #[derive(JSTraceable, MallocSizeOf)]
-            struct CapFlags: u16 {
+            impl CapFlags: u16 {
                 $(const $name = $value;)*
             }
         }
@@ -4733,7 +4746,7 @@ capabilities! {
     STENCIL_TEST,
 }
 
-#[unrooted_must_root_lint::must_root]
+#[crown::unrooted_must_root_lint::must_root]
 #[derive(JSTraceable, MallocSizeOf)]
 pub struct Textures {
     active_unit: Cell<u32>,
@@ -4813,7 +4826,7 @@ impl Textures {
     }
 }
 
-#[unrooted_must_root_lint::must_root]
+#[crown::unrooted_must_root_lint::must_root]
 #[derive(Default, JSTraceable, MallocSizeOf)]
 struct TextureUnit {
     tex_2d: MutNullableDom<WebGLTexture>,
@@ -4886,54 +4899,37 @@ pub enum TexSource {
 
 #[derive(JSTraceable)]
 pub struct WebGLCommandSender {
+    #[no_trace]
     sender: WebGLChan,
-    waker: Option<Box<dyn EventLoopWaker>>,
 }
 
 impl WebGLCommandSender {
-    pub fn new(sender: WebGLChan, waker: Option<Box<dyn EventLoopWaker>>) -> WebGLCommandSender {
-        WebGLCommandSender { sender, waker }
+    pub fn new(sender: WebGLChan) -> WebGLCommandSender {
+        WebGLCommandSender { sender }
     }
 
     pub fn send(&self, msg: WebGLMsg) -> WebGLSendResult {
-        let result = self.sender.send(msg);
-        if let Some(ref waker) = self.waker {
-            waker.wake();
-        }
-        result
+        self.sender.send(msg)
     }
 }
 
 #[derive(JSTraceable, MallocSizeOf)]
 pub(crate) struct WebGLMessageSender {
+    #[no_trace]
     sender: WebGLMsgSender,
-    #[ignore_malloc_size_of = "traits are cumbersome"]
-    waker: Option<Box<dyn EventLoopWaker>>,
 }
 
 impl Clone for WebGLMessageSender {
     fn clone(&self) -> WebGLMessageSender {
         WebGLMessageSender {
             sender: self.sender.clone(),
-            waker: self.waker.as_ref().map(|w| (*w).clone_box()),
         }
     }
 }
 
 impl WebGLMessageSender {
-    fn wake_after_send<F: FnOnce() -> WebGLSendResult>(&self, f: F) -> WebGLSendResult {
-        let result = f();
-        if let Some(ref waker) = self.waker {
-            waker.wake();
-        }
-        result
-    }
-
-    pub fn new(
-        sender: WebGLMsgSender,
-        waker: Option<Box<dyn EventLoopWaker>>,
-    ) -> WebGLMessageSender {
-        WebGLMessageSender { sender, waker }
+    pub fn new(sender: WebGLMsgSender) -> WebGLMessageSender {
+        WebGLMessageSender { sender }
     }
 
     pub fn context_id(&self) -> WebGLContextId {
@@ -4941,7 +4937,7 @@ impl WebGLMessageSender {
     }
 
     pub fn send(&self, msg: WebGLCommand, backtrace: WebGLCommandBacktrace) -> WebGLSendResult {
-        self.wake_after_send(|| self.sender.send(msg, backtrace))
+        self.sender.send(msg, backtrace)
     }
 
     pub fn send_resize(
@@ -4949,11 +4945,11 @@ impl WebGLMessageSender {
         size: Size2D<u32>,
         sender: WebGLSender<Result<(), String>>,
     ) -> WebGLSendResult {
-        self.wake_after_send(|| self.sender.send_resize(size, sender))
+        self.sender.send_resize(size, sender)
     }
 
     pub fn send_remove(&self) -> WebGLSendResult {
-        self.wake_after_send(|| self.sender.send_remove())
+        self.sender.send_remove()
     }
 }
 

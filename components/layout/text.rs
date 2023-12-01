@@ -4,22 +4,19 @@
 
 //! Text layout.
 
-use crate::context::LayoutFontContext;
-use crate::fragment::{Fragment, ScannedTextFlags};
-use crate::fragment::{ScannedTextFragmentInfo, SpecificFragmentInfo, UnscannedTextFragmentInfo};
-use crate::inline::{InlineFragmentNodeFlags, InlineFragments};
-use crate::linked_list::split_off_head;
+use std::borrow::ToOwned;
+use std::collections::LinkedList;
+use std::mem;
+use std::sync::Arc;
+
 use app_units::Au;
 use gfx::font::{self, FontMetrics, FontRef, RunMetrics, ShapingFlags, ShapingOptions};
 use gfx::text::glyph::ByteIndex;
 use gfx::text::text_run::TextRun;
 use gfx::text::util::{self, CompressionMode};
+use log::{debug, warn};
 use range::Range;
 use servo_atoms::Atom;
-use std::borrow::ToOwned;
-use std::collections::LinkedList;
-use std::mem;
-use std::sync::Arc;
 use style::computed_values::text_rendering::T as TextRendering;
 use style::computed_values::white_space::T as WhiteSpace;
 use style::computed_values::word_break::T as WordBreak;
@@ -31,6 +28,14 @@ use style::values::specified::text::{TextTransform, TextTransformCase};
 use unicode_bidi as bidi;
 use unicode_script::Script;
 use xi_unicode::LineBreakLeafIter;
+
+use crate::context::LayoutFontContext;
+use crate::fragment::{
+    Fragment, ScannedTextFlags, ScannedTextFragmentInfo, SpecificFragmentInfo,
+    UnscannedTextFragmentInfo,
+};
+use crate::inline::{InlineFragmentNodeFlags, InlineFragments};
+use crate::linked_list::split_off_head;
 
 /// Returns the concatenated text of a list of unscanned text fragments.
 fn text(fragments: &LinkedList<Fragment>) -> String {
@@ -363,10 +368,16 @@ impl TextRunScanner {
                 }
 
                 // If no font is found (including fallbacks), there's no way we can render.
-                let font = run_info
+                let font = match run_info
                     .font
                     .or_else(|| font_group.borrow_mut().first(&mut font_context))
-                    .expect("No font found for text run!");
+                {
+                    Some(font) => font,
+                    None => {
+                        result.push(None);
+                        continue;
+                    },
+                };
 
                 let (run, break_at_zero) = TextRun::new(
                     &mut *font.borrow_mut(),
@@ -375,13 +386,13 @@ impl TextRunScanner {
                     run_info.bidi_level,
                     linebreaker,
                 );
-                result.push((
+                result.push(Some((
                     ScannedTextRun {
                         run: Arc::new(run),
                         insertion_point: run_info.insertion_point,
                     },
                     break_at_zero,
-                ))
+                )))
             }
             result
         };
@@ -412,7 +423,14 @@ impl TextRunScanner {
                     },
                 };
                 let mapping = mappings.next().unwrap();
-                let (scanned_run, break_at_zero) = runs[mapping.text_run_index].clone();
+                let run = runs[mapping.text_run_index].clone();
+                let (scanned_run, break_at_zero) = match run {
+                    Some(run) => run,
+                    None => {
+                        warn!("Could not find found for TextRun!");
+                        continue;
+                    },
+                };
 
                 let mut byte_range = Range::new(
                     ByteIndex(mapping.byte_range.begin() as isize),
@@ -533,7 +551,7 @@ pub fn font_metrics_for_style(
 
 /// Returns the line block-size needed by the given computed style and font size.
 pub fn line_height_from_style(style: &ComputedValues, metrics: &FontMetrics) -> Au {
-    let font_size = style.get_font().font_size.size();
+    let font_size = style.get_font().font_size.computed_size();
     match style.get_inherited_text().line_height {
         LineHeight::Normal => Au::from(metrics.line_gap),
         LineHeight::Number(l) => Au::from(font_size * l.0),

@@ -2,19 +2,19 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
-use crate::dom::bindings::codegen::Bindings::EventBinding::EventBinding::EventMethods;
-use crate::dom::bindings::codegen::Bindings::GPUUncapturedErrorEventBinding::{
-    GPUUncapturedErrorEventInit, GPUUncapturedErrorEventMethods,
+use dom_struct::dom_struct;
+use js::rust::HandleObject;
+use servo_atoms::Atom;
+
+use crate::dom::bindings::codegen::Bindings::EventBinding::Event_Binding::EventMethods;
+use crate::dom::bindings::codegen::Bindings::WebGPUBinding::{
+    GPUError, GPUUncapturedErrorEventInit, GPUUncapturedErrorEventMethods,
 };
-use crate::dom::bindings::codegen::Bindings::GPUValidationErrorBinding::GPUError;
 use crate::dom::bindings::reflector::reflect_dom_object_with_proto;
 use crate::dom::bindings::root::DomRoot;
 use crate::dom::bindings::str::DOMString;
 use crate::dom::event::Event;
 use crate::dom::globalscope::GlobalScope;
-use dom_struct::dom_struct;
-use js::rust::HandleObject;
-use servo_atoms::Atom;
 
 #[dom_struct]
 pub struct GPUUncapturedErrorEvent {

@@ -2,7 +2,10 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
-use crate::canvas_data::*;
+use std::borrow::ToOwned;
+use std::collections::HashMap;
+use std::thread;
+
 use canvas_traits::canvas::*;
 use canvas_traits::ConstellationCanvasMsg;
 use crossbeam_channel::{select, unbounded, Sender};
@@ -10,10 +13,10 @@ use euclid::default::Size2D;
 use gfx::font_cache_thread::FontCacheThread;
 use ipc_channel::ipc::{self, IpcSender};
 use ipc_channel::router::ROUTER;
-use std::borrow::ToOwned;
-use std::collections::HashMap;
-use std::thread;
+use log::warn;
 use webrender_api::{ImageData, ImageDescriptor, ImageKey};
+
+use crate::canvas_data::*;
 
 pub enum AntialiasMode {
     Default,
@@ -172,22 +175,27 @@ impl<'a> CanvasPaintThread<'a> {
                 .canvas(canvas_id)
                 .is_point_in_path(x, y, fill_rule, chan),
             Canvas2dMsg::DrawImage(
-                imagedata,
+                ref image_data,
                 image_size,
                 dest_rect,
                 source_rect,
                 smoothing_enabled,
-            ) => {
-                let data = imagedata.map_or_else(
-                    || vec![0; image_size.width as usize * image_size.height as usize * 4],
-                    |bytes| bytes.into_vec(),
-                );
+            ) => self.canvas(canvas_id).draw_image(
+                &*image_data,
+                image_size,
+                dest_rect,
+                source_rect,
+                smoothing_enabled,
+                true,
+            ),
+            Canvas2dMsg::DrawEmptyImage(image_size, dest_rect, source_rect) => {
                 self.canvas(canvas_id).draw_image(
-                    data,
+                    &vec![0; image_size.area() as usize * 4],
                     image_size,
                     dest_rect,
                     source_rect,
-                    smoothing_enabled,
+                    false,
+                    false,
                 )
             },
             Canvas2dMsg::DrawImageInOther(
@@ -201,11 +209,12 @@ impl<'a> CanvasPaintThread<'a> {
                     .canvas(canvas_id)
                     .read_pixels(source_rect.to_u64(), image_size.to_u64());
                 self.canvas(other_canvas_id).draw_image(
-                    image_data.into(),
+                    &image_data,
                     source_rect.size,
                     dest_rect,
                     source_rect,
                     smoothing,
+                    false,
                 );
             },
             Canvas2dMsg::MoveTo(ref point) => self.canvas(canvas_id).move_to(point),

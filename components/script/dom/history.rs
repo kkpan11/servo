@@ -2,8 +2,21 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
+use std::cell::Cell;
+
+use dom_struct::dom_struct;
+use js::jsapi::Heap;
+use js::jsval::{JSVal, NullValue, UndefinedValue};
+use js::rust::HandleValue;
+use msg::constellation_msg::{HistoryStateId, TraversalDirection};
+use net_traits::{CoreResourceMsg, IpcSend};
+use profile_traits::ipc;
+use profile_traits::ipc::channel;
+use script_traits::{ScriptMsg, StructuredSerializedData};
+use servo_url::ServoUrl;
+
 use crate::dom::bindings::codegen::Bindings::HistoryBinding::HistoryMethods;
-use crate::dom::bindings::codegen::Bindings::LocationBinding::LocationBinding::LocationMethods;
+use crate::dom::bindings::codegen::Bindings::LocationBinding::Location_Binding::LocationMethods;
 use crate::dom::bindings::codegen::Bindings::WindowBinding::WindowMethods;
 use crate::dom::bindings::error::{Error, ErrorResult, Fallible};
 use crate::dom::bindings::inheritance::Castable;
@@ -18,17 +31,6 @@ use crate::dom::hashchangeevent::HashChangeEvent;
 use crate::dom::popstateevent::PopStateEvent;
 use crate::dom::window::Window;
 use crate::script_runtime::JSContext;
-use dom_struct::dom_struct;
-use js::jsapi::Heap;
-use js::jsval::{JSVal, NullValue, UndefinedValue};
-use js::rust::HandleValue;
-use msg::constellation_msg::{HistoryStateId, TraversalDirection};
-use net_traits::{CoreResourceMsg, IpcSend};
-use profile_traits::ipc;
-use profile_traits::ipc::channel;
-use script_traits::{ScriptMsg, StructuredSerializedData};
-use servo_url::ServoUrl;
-use std::cell::Cell;
 
 enum PushOrReplace {
     Push,
@@ -42,6 +44,7 @@ pub struct History {
     window: Dom<Window>,
     #[ignore_malloc_size_of = "mozjs"]
     state: Heap<JSVal>,
+    #[no_trace]
     state_id: Cell<Option<HistoryStateId>>,
 }
 

@@ -2,19 +2,20 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
+use std::borrow::Cow;
+
+use html5ever::LocalName;
+use script_layout_interface::wrapper_traits::{ThreadSafeLayoutElement, ThreadSafeLayoutNode};
+use servo_arc::Arc as ServoArc;
+use style::properties::ComputedValues;
+use style::selector_parser::PseudoElement;
+use style::values::generics::counters::{Content, ContentItem};
+
 use crate::context::LayoutContext;
 use crate::dom::{BoxSlot, LayoutBox, NodeExt};
 use crate::fragment_tree::{BaseFragmentInfo, FragmentFlags, Tag};
 use crate::replaced::ReplacedContent;
 use crate::style_ext::{Display, DisplayGeneratingBox, DisplayInside, DisplayOutside};
-use html5ever::LocalName;
-use script_layout_interface::wrapper_traits::{ThreadSafeLayoutElement, ThreadSafeLayoutNode};
-use servo_arc::Arc as ServoArc;
-use std::borrow::Cow;
-use style::properties::ComputedValues;
-use style::selector_parser::PseudoElement;
-use style::values::generics::counters::Content;
-use style::values::generics::counters::ContentItem;
 
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum WhichPseudoElement {
@@ -227,7 +228,7 @@ fn traverse_pseudo_element_contents<'dom, Node>(
                         .stylist
                         .style_for_anonymous::<Node::ConcreteElement>(
                             &context.shared_context().guards,
-                            &PseudoElement::ServoText,
+                            &PseudoElement::ServoAnonymousBox,
                             &info.style,
                         )
                 });

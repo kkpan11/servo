@@ -2,8 +2,26 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
+use std::rc::Rc;
+use std::{ptr, str};
+
+use encoding_rs::UTF_8;
+use ipc_channel::ipc::{self, IpcReceiver, IpcSender};
+use ipc_channel::router::ROUTER;
+use js::jsapi::{Heap, JSObject, JS_ClearPendingException, Value as JSValue};
+use js::jsval::{JSVal, UndefinedValue};
+use js::rust::wrappers::{JS_GetPendingException, JS_ParseJSON};
+use js::rust::HandleValue;
+use js::typedarray::{ArrayBuffer, CreateWith};
+use mime::{self, Mime};
+use net_traits::request::{
+    BodyChunkRequest, BodyChunkResponse, BodySource as NetBodySource, RequestBody,
+};
+use script_traits::serializable::BlobImpl;
+use url::form_urlencoded;
+
 use crate::dom::bindings::cell::DomRefCell;
-use crate::dom::bindings::codegen::Bindings::BlobBinding::BlobBinding::BlobMethods;
+use crate::dom::bindings::codegen::Bindings::BlobBinding::Blob_Binding::BlobMethods;
 use crate::dom::bindings::codegen::Bindings::FormDataBinding::FormDataMethods;
 use crate::dom::bindings::codegen::Bindings::XMLHttpRequestBinding::BodyInit;
 use crate::dom::bindings::error::{Error, Fallible};
@@ -24,30 +42,7 @@ use crate::realms::{enter_realm, AlreadyInRealm, InRealm};
 use crate::script_runtime::JSContext;
 use crate::task::TaskCanceller;
 use crate::task_source::networking::NetworkingTaskSource;
-use crate::task_source::TaskSource;
-use crate::task_source::TaskSourceName;
-use encoding_rs::UTF_8;
-use ipc_channel::ipc::{self, IpcReceiver, IpcSender};
-use ipc_channel::router::ROUTER;
-use js::jsapi::Heap;
-use js::jsapi::JSObject;
-use js::jsapi::JS_ClearPendingException;
-use js::jsapi::Value as JSValue;
-use js::jsval::JSVal;
-use js::jsval::UndefinedValue;
-use js::rust::wrappers::JS_GetPendingException;
-use js::rust::wrappers::JS_ParseJSON;
-use js::rust::HandleValue;
-use js::typedarray::{ArrayBuffer, CreateWith};
-use mime::{self, Mime};
-use net_traits::request::{
-    BodyChunkRequest, BodyChunkResponse, BodySource as NetBodySource, RequestBody,
-};
-use script_traits::serializable::BlobImpl;
-use std::ptr;
-use std::rc::Rc;
-use std::str;
-use url::form_urlencoded;
+use crate::task_source::{TaskSource, TaskSourceName};
 
 /// The Dom object, or ReadableStream, that is the source of a body.
 /// <https://fetch.spec.whatwg.org/#concept-body-source>
@@ -281,9 +276,11 @@ impl TransmitBodyConnectHandler {
 #[derive(Clone, JSTraceable, MallocSizeOf)]
 struct TransmitBodyPromiseHandler {
     #[ignore_malloc_size_of = "Channels are hard"]
+    #[no_trace]
     bytes_sender: IpcSender<BodyChunkResponse>,
     stream: DomRoot<ReadableStream>,
     #[ignore_malloc_size_of = "Channels are hard"]
+    #[no_trace]
     control_sender: IpcSender<BodyChunkRequest>,
 }
 
@@ -328,9 +325,11 @@ impl Callback for TransmitBodyPromiseHandler {
 #[derive(Clone, JSTraceable, MallocSizeOf)]
 struct TransmitBodyPromiseRejectionHandler {
     #[ignore_malloc_size_of = "Channels are hard"]
+    #[no_trace]
     bytes_sender: IpcSender<BodyChunkResponse>,
     stream: DomRoot<ReadableStream>,
     #[ignore_malloc_size_of = "Channels are hard"]
+    #[no_trace]
     control_sender: IpcSender<BodyChunkRequest>,
 }
 
@@ -716,7 +715,7 @@ impl Callback for ConsumeBodyPromiseHandler {
 }
 
 // https://fetch.spec.whatwg.org/#concept-body-consume-body
-#[allow(unrooted_must_root)]
+#[allow(crown::unrooted_must_root)]
 pub fn consume_body<T: BodyMixin + DomObject>(object: &T, body_type: BodyType) -> Rc<Promise> {
     let in_realm_proof = AlreadyInRealm::assert();
     let promise = Promise::new_in_current_realm(InRealm::Already(&in_realm_proof));
@@ -740,7 +739,7 @@ pub fn consume_body<T: BodyMixin + DomObject>(object: &T, body_type: BodyType) -
 }
 
 // https://fetch.spec.whatwg.org/#concept-body-consume-body
-#[allow(unrooted_must_root)]
+#[allow(crown::unrooted_must_root)]
 fn consume_body_with_promise<T: BodyMixin + DomObject>(
     object: &T,
     body_type: BodyType,

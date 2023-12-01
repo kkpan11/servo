@@ -2,6 +2,29 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
+use std::default::Default;
+use std::rc::Rc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+
+use crossbeam_channel::Receiver;
+use devtools_traits::{DevtoolScriptControlMsg, WorkerId};
+use dom_struct::dom_struct;
+use ipc_channel::ipc::IpcSender;
+use js::jsval::UndefinedValue;
+use js::panic::maybe_resume_unwind;
+use js::rust::{HandleValue, ParentRuntime};
+use msg::constellation_msg::{PipelineId, PipelineNamespace};
+use net_traits::request::{
+    CredentialsMode, Destination, ParserMetadata, RequestBuilder as NetRequestInit,
+};
+use net_traits::IpcSend;
+use parking_lot::Mutex;
+use script_traits::WorkerGlobalScopeInit;
+use servo_url::{MutableOrigin, ServoUrl};
+use time::precise_time_ns;
+use uuid::Uuid;
+
 use crate::dom::bindings::cell::{DomRefCell, Ref};
 use crate::dom::bindings::codegen::Bindings::ImageBitmapBinding::{
     ImageBitmapOptions, ImageBitmapSource,
@@ -30,8 +53,10 @@ use crate::dom::workerlocation::WorkerLocation;
 use crate::dom::workernavigator::WorkerNavigator;
 use crate::fetch;
 use crate::realms::{enter_realm, InRealm};
-use crate::script_runtime::JSContext;
-use crate::script_runtime::{get_reports, CommonScriptMsg, Runtime, ScriptChan, ScriptPort};
+use crate::script_runtime::{
+    get_reports, CommonScriptMsg, ContextForRequestInterrupt, JSContext, Runtime, ScriptChan,
+    ScriptPort,
+};
 use crate::task::TaskCanceller;
 use crate::task_source::dom_manipulation::DOMManipulationTaskSource;
 use crate::task_source::file_reading::FileReadingTaskSource;
@@ -42,27 +67,6 @@ use crate::task_source::remote_event::RemoteEventTaskSource;
 use crate::task_source::timer::TimerTaskSource;
 use crate::task_source::websocket::WebsocketTaskSource;
 use crate::timers::{IsInterval, TimerCallback};
-use crossbeam_channel::Receiver;
-use devtools_traits::{DevtoolScriptControlMsg, WorkerId};
-use dom_struct::dom_struct;
-use ipc_channel::ipc::IpcSender;
-use js::jsval::UndefinedValue;
-use js::panic::maybe_resume_unwind;
-use js::rust::{HandleValue, ParentRuntime};
-use msg::constellation_msg::{PipelineId, PipelineNamespace};
-use net_traits::request::{
-    CredentialsMode, Destination, ParserMetadata, RequestBuilder as NetRequestInit,
-};
-use net_traits::IpcSend;
-use parking_lot::Mutex;
-use script_traits::WorkerGlobalScopeInit;
-use servo_url::{MutableOrigin, ServoUrl};
-use std::default::Default;
-use std::rc::Rc;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
-use time::precise_time_ns;
-use uuid::Uuid;
 
 pub fn prepare_workerscope_init(
     global: &GlobalScope,
@@ -97,7 +101,9 @@ pub struct WorkerGlobalScope {
     worker_name: DOMString,
     worker_type: WorkerType,
 
+    #[no_trace]
     worker_id: WorkerId,
+    #[no_trace]
     worker_url: DomRefCell<ServoUrl>,
     #[ignore_malloc_size_of = "Arc"]
     closing: Arc<AtomicBool>,
@@ -107,11 +113,13 @@ pub struct WorkerGlobalScope {
     navigator: MutNullableDom<WorkerNavigator>,
 
     #[ignore_malloc_size_of = "Defined in ipc-channel"]
+    #[no_trace]
     /// Optional `IpcSender` for sending the `DevtoolScriptControlMsg`
     /// to the server from within the worker
     from_devtools_sender: Option<IpcSender<DevtoolScriptControlMsg>>,
 
     #[ignore_malloc_size_of = "Defined in std"]
+    #[no_trace]
     /// This `Receiver` will be ignored later if the corresponding
     /// `IpcSender` doesn't exist
     from_devtools_receiver: Receiver<DevtoolScriptControlMsg>,
@@ -166,7 +174,10 @@ impl WorkerGlobalScope {
     }
 
     /// Clear various items when the worker event-loop shuts-down.
-    pub fn clear_js_runtime(&self) {
+    pub fn clear_js_runtime(&self, cx_for_interrupt: ContextForRequestInterrupt) {
+        // Ensure parent thread can no longer request interrupt
+        // using our JSContext that will soon be destroyed
+        cx_for_interrupt.revoke();
         self.upcast::<GlobalScope>()
             .remove_web_messaging_and_dedicated_workers_infra();
 
@@ -283,8 +294,14 @@ impl WorkerGlobalScopeMethods for WorkerGlobalScope {
             match result {
                 Ok(_) => (),
                 Err(_) => {
-                    println!("evaluate_script failed");
-                    return Err(Error::JSFailed);
+                    if self.is_closing() {
+                        // Don't return JSFailed as we might not have
+                        // any pending exceptions.
+                        println!("evaluate_script failed (terminated)");
+                    } else {
+                        println!("evaluate_script failed");
+                        return Err(Error::JSFailed);
+                    }
                 },
             }
         }
@@ -381,7 +398,7 @@ impl WorkerGlobalScopeMethods for WorkerGlobalScope {
         p
     }
 
-    #[allow(unrooted_must_root)]
+    #[allow(crown::unrooted_must_root)]
     // https://fetch.spec.whatwg.org/#fetch-method
     fn Fetch(
         &self,

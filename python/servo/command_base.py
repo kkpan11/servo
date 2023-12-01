@@ -7,9 +7,10 @@
 # option. This file may not be copied, modified, or distributed
 # except according to those terms.
 
-from __future__ import print_function
+from __future__ import annotations
 
 import contextlib
+from enum import Enum
 from typing import Dict, List, Optional
 import functools
 import gzip
@@ -26,13 +27,13 @@ import tarfile
 import urllib
 import zipfile
 
+from dataclasses import dataclass
 from errno import ENOENT as NO_SUCH_FILE_OR_DIRECTORY
 from glob import glob
 from os import path
 from subprocess import PIPE
 from xml.etree.ElementTree import XML
 
-import six
 import toml
 
 from mach_bootstrap import _get_exec_path
@@ -43,8 +44,53 @@ import servo.platform
 import servo.util as util
 from servo.util import download_file, get_default_cache_dir
 
-BIN_SUFFIX = ".exe" if sys.platform == "win32" else ""
 NIGHTLY_REPOSITORY_URL = "https://servo-builds2.s3.amazonaws.com/"
+
+
+@dataclass
+class BuildType:
+    class Kind(Enum):
+        DEV = 1
+        RELEASE = 2
+        CUSTOM = 3
+
+    kind: Kind
+    profile: Optional[str]
+
+    def dev() -> BuildType:
+        return BuildType(BuildType.Kind.DEV, None)
+
+    def release() -> BuildType:
+        return BuildType(BuildType.Kind.RELEASE, None)
+
+    def prod() -> BuildType:
+        return BuildType(BuildType.Kind.CUSTOM, "production")
+
+    def custom(profile: str) -> BuildType:
+        return BuildType(BuildType.Kind.CUSTOM, profile)
+
+    def is_dev(self) -> bool:
+        return self.kind == BuildType.Kind.DEV
+
+    def is_release(self) -> bool:
+        return self.kind == BuildType.Kind.RELEASE
+
+    def is_prod(self) -> bool:
+        return self.kind == BuildType.Kind.CUSTOM and self.profile == "production"
+
+    def is_custom(self) -> bool:
+        return self.kind == BuildType.Kind.CUSTOM
+
+    def directory_name(self) -> str:
+        if self.is_dev():
+            return "debug"
+        elif self.is_release():
+            return "release"
+        else:
+            return self.profile
+
+    def __eq__(self, other: object) -> bool:
+        raise Exception("BUG: do not compare BuildType with ==")
 
 
 @contextlib.contextmanager
@@ -142,7 +188,7 @@ def call(*args, **kwargs):
     return subprocess.call(*args, shell=sys.platform == 'win32', **kwargs)
 
 
-def check_output(*args, **kwargs):
+def check_output(*args, **kwargs) -> bytes:
     """Wrap `subprocess.call`, printing the command if verbose=True."""
     verbose = kwargs.pop('verbose', False)
     if verbose:
@@ -245,7 +291,6 @@ class CommandBase(object):
 
         context.sharedir = self.config["tools"]["cache-dir"]
 
-        self.config["tools"].setdefault("use-rustup", True)
         self.config["tools"].setdefault("rustc-with-gold", get_env_bool("SERVO_RUSTC_WITH_GOLD", True))
 
         self.config.setdefault("build", {})
@@ -253,7 +298,6 @@ class CommandBase(object):
         self.config["build"].setdefault("mode", "")
         self.config["build"].setdefault("debug-assertions", False)
         self.config["build"].setdefault("debug-mozjs", False)
-        self.config["build"].setdefault("layout-2020", True)
         self.config["build"].setdefault("media-stack", "auto")
         self.config["build"].setdefault("ccache", "")
         self.config["build"].setdefault("rustflags", "")
@@ -273,47 +317,31 @@ class CommandBase(object):
     _rust_toolchain = None
 
     def rust_toolchain(self):
-        if self._rust_toolchain is None:
-            filename = path.join(self.context.topdir, "rust-toolchain")
-            with open(filename) as f:
-                self._rust_toolchain = f.read().strip()
+        if self._rust_toolchain:
+            return self._rust_toolchain
 
-            if platform.system() == "Windows":
-                self._rust_toolchain += "-x86_64-pc-windows-msvc"
-
+        toolchain_file = path.join(self.context.topdir, "rust-toolchain.toml")
+        self._rust_toolchain = toml.load(toolchain_file)['toolchain']['channel']
         return self._rust_toolchain
-
-    def call_rustup_run(self, args, **kwargs):
-        if self.config["tools"]["use-rustup"]:
-            assert self.context.bootstrapped
-            args = ["rustup" + BIN_SUFFIX, "run", "--install", self.rust_toolchain()] + args
-        else:
-            args[0] += BIN_SUFFIX
-        return call(args, **kwargs)
 
     def get_top_dir(self):
         return self.context.topdir
 
-    def get_apk_path(self, release):
+    def get_apk_path(self, build_type: BuildType):
         base_path = util.get_target_dir()
         base_path = path.join(base_path, "android", self.config["android"]["target"])
         apk_name = "servoapp.apk"
-        build_type = "release" if release else "debug"
-        return path.join(base_path, build_type, apk_name)
+        return path.join(base_path, build_type.directory_name(), apk_name)
 
-    def get_binary_path(self, release, dev, target=None, android=False, simpleservo=False):
-        # TODO(autrilla): this function could still use work - it shouldn't
-        # handle quitting, or printing. It should return the path, or an error.
+    def get_binary_path(self, build_type: BuildType, target=None, android=False, simpleservo=False):
         base_path = util.get_target_dir()
-
-        binary_name = "servo" + BIN_SUFFIX
-
         if android:
             base_path = path.join(base_path, "android", self.config["android"]["target"])
             simpleservo = True
         elif target:
             base_path = path.join(base_path, target)
 
+        binary_name = f"servo{servo.platform.get().executable_suffix()}"
         if simpleservo:
             if sys.platform == "win32":
                 binary_name = "simpleservo.dll"
@@ -322,41 +350,11 @@ class CommandBase(object):
             else:
                 binary_name = "libsimpleservo.so"
 
-        release_path = path.join(base_path, "release", binary_name)
-        dev_path = path.join(base_path, "debug", binary_name)
+        binary_path = path.join(base_path, build_type.directory_name(), binary_name)
 
-        # Prefer release if both given
-        if release and dev:
-            dev = False
-
-        release_exists = path.exists(release_path)
-        dev_exists = path.exists(dev_path)
-
-        if not release_exists and not dev_exists:
-            raise BuildNotFound('No Servo binary found.'
-                                ' Perhaps you forgot to run `./mach build`?')
-
-        if release and release_exists:
-            return release_path
-
-        if dev and dev_exists:
-            return dev_path
-
-        if not dev and not release and release_exists and dev_exists:
-            print("You have multiple profiles built. Please specify which "
-                  "one to run with '--release' or '--dev'.")
-            sys.exit()
-
-        if not dev and not release:
-            if release_exists:
-                return release_path
-            else:
-                return dev_path
-
-        print("The %s profile is not built. Please run './mach build%s' "
-              "and try again." % ("release" if release else "dev",
-                                  " --release" if release else ""))
-        sys.exit()
+        if not path.exists(binary_path):
+            raise BuildNotFound('No Servo binary found. Perhaps you forgot to run `./mach build`?')
+        return binary_path
 
     def detach_volume(self, mounted_volume):
         print("Detaching volume {}".format(mounted_volume))
@@ -501,70 +499,37 @@ class CommandBase(object):
         """Return an extended environment dictionary."""
         env = os.environ.copy()
 
-        if "media-dummy" not in self.features:
-            servo.platform.get().set_gstreamer_environment_variables_if_necessary(
-                env, cross_compilation_target=self.cross_compile_target,
-                check_installation=is_build)
+        servo.platform.get().set_gstreamer_environment_variables_if_necessary(
+            env, cross_compilation_target=self.cross_compile_target,
+            check_installation=is_build)
 
-        extra_path = []
         effective_target = self.cross_compile_target or servo.platform.host_triple()
         if "msvc" in effective_target:
-            extra_path += [path.join(self.msvc_package_dir("llvm"), "bin")]
-            env.setdefault("CC", "clang-cl.exe")
-            env.setdefault("CXX", "clang-cl.exe")
-
-            arch = effective_target.split('-')[0]
-            vcpkg_arch = {
-                "x86_64": "x64-windows",
-                "i686": "x86-windows",
-                "aarch64": "arm64-windows",
-            }
-            target_arch = vcpkg_arch[arch]
-            openssl_base_dir = path.join(self.msvc_package_dir("openssl"), target_arch)
-
-            # Link openssl
-            env["OPENSSL_INCLUDE_DIR"] = path.join(openssl_base_dir, "include")
-            env["OPENSSL_LIB_DIR"] = path.join(openssl_base_dir, "lib")
-            env["OPENSSL_LIBS"] = "libssl:libcrypto"
-            # Link moztools, used for building SpiderMonkey
-            moztools_paths = [
-                path.join(self.msvc_package_dir("moztools"), "bin"),
-                path.join(self.msvc_package_dir("moztools"), "msys", "bin"),
-            ]
-            # In certain cases we need to ensure that tools with conflicting MSYS versions
-            # can be placed in the PATH ahead of the moztools directories.
-            moztools_path_prepend = env.get("MOZTOOLS_PATH_PREPEND", None)
-            if moztools_path_prepend:
-                moztools_paths.insert(0, moztools_path_prepend)
-            env["MOZTOOLS_PATH"] = os.pathsep.join(moztools_paths)
-            # Link autoconf 2.13, used for building SpiderMonkey
-            env["AUTOCONF"] = path.join(self.msvc_package_dir("moztools"), "msys", "local", "bin", "autoconf-2.13")
-            # Link LLVM
-            env["LIBCLANG_PATH"] = path.join(self.msvc_package_dir("llvm"), "lib")
-
-            if not os.environ.get("NATIVE_WIN32_PYTHON"):
-                env["NATIVE_WIN32_PYTHON"] = sys.executable
             # Always build harfbuzz from source
             env["HARFBUZZ_SYS_NO_PKG_CONFIG"] = "true"
 
         if sys.platform != "win32":
             env.setdefault("CC", "clang")
             env.setdefault("CXX", "clang++")
-
-        if extra_path:
-            util.append_paths_to_env(env, "PATH", extra_path)
+        else:
+            env.setdefault("CC", "clang-cl.exe")
+            env.setdefault("CXX", "clang-cl.exe")
 
         if self.config["build"]["incremental"]:
             env["CARGO_INCREMENTAL"] = "1"
         elif self.config["build"]["incremental"] is not None:
             env["CARGO_INCREMENTAL"] = "0"
 
-        if self.config["build"]["rustflags"]:
-            env['RUSTFLAGS'] = env.get('RUSTFLAGS', "") + " " + self.config["build"]["rustflags"]
+        env['RUSTFLAGS'] = env.get('RUSTFLAGS', "")
 
-        if self.config["tools"]["rustc-with-gold"]:
-            if shutil.which('ld.gold'):
-                env['RUSTFLAGS'] = env.get('RUSTFLAGS', "") + " -C link-args=-fuse-ld=gold"
+        if self.config["build"]["rustflags"]:
+            env['RUSTFLAGS'] += " " + self.config["build"]["rustflags"]
+
+        # Turn on rust's version of lld if we are on x86 Linux.
+        # TODO(mrobinson): Gradually turn this on for more platforms, when support stabilizes.
+        # See https://github.com/rust-lang/rust/issues/39915
+        if not self.cross_compile_target and effective_target == "x86_64-unknown-linux-gnu":
+            env['RUSTFLAGS'] += " " + servo.platform.get().linker_flag()
 
         if not (self.config["build"]["ccache"] == ""):
             env['CCACHE'] = self.config["build"]["ccache"]
@@ -573,45 +538,9 @@ class CommandBase(object):
         if self.cross_compile_target and (
             self.cross_compile_target.startswith('arm')
                 or self.cross_compile_target.startswith('aarch64')):
-            env['RUSTFLAGS'] = env.get('RUSTFLAGS', "") + " -C target-feature=+neon"
+            env['RUSTFLAGS'] += " -C target-feature=+neon"
 
-        env['RUSTFLAGS'] = env.get('RUSTFLAGS', "") + " -W unused-extern-crates"
         env["CARGO_TARGET_DIR"] = servo.util.get_target_dir()
-
-        git_info = []
-        if os.path.isdir('.git') and is_build:
-            # Get the subject of the commit
-            git_commit_subject = subprocess.check_output([
-                'git', 'show', '-s', '--format=%s', 'HEAD'
-            ]).strip()
-
-            git_sha = None
-            # Check if it's a bundle commit
-            if git_commit_subject.startswith(b"Shallow version of commit "):
-                # This is a bundle commit
-                # Get the SHA-1 from the bundle subject: "Shallow version of commit {sha1}"
-                git_sha = git_commit_subject.split(b' ')[-1].strip()
-                # Shorten hash
-                # NOTE: Partially verifies the hash, but it will still pass if it's, e.g., a tree
-                git_sha = subprocess.check_output([
-                    'git', 'rev-parse', '--short', git_sha.decode('ascii')
-                ])
-            else:
-                # This is a regular commit
-                git_sha = subprocess.check_output([
-                    'git', 'rev-parse', '--short', 'HEAD'
-                ]).strip()
-
-            git_is_dirty = bool(subprocess.check_output([
-                'git', 'status', '--porcelain'
-            ]).strip())
-
-            git_info.append('')
-            git_info.append(six.ensure_str(git_sha))
-            if git_is_dirty:
-                git_info.append('dirty')
-
-        env['GIT_INFO'] = '-'.join(git_info)
 
         if self.config["build"]["thinlto"]:
             env['RUSTFLAGS'] += " -Z thinlto"
@@ -673,9 +602,6 @@ class CommandBase(object):
         android_lib = self.config["android"]["lib"]
         android_arch = self.config["android"]["arch"]
 
-        # Build OpenSSL for android
-        env["OPENSSL_VERSION"] = "1.1.1d"
-
         # Check if the NDK version is 15
         if not os.path.isfile(path.join(env["ANDROID_NDK"], 'source.properties')):
             print("ANDROID_NDK should have file `source.properties`.")
@@ -687,11 +613,6 @@ class CommandBase(object):
                 print("Currently only support NDK 15. Please re-run `./mach bootstrap-android`.")
                 sys.exit(1)
 
-        openssl_dir = path.join(
-            self.target_path, "native", "openssl", "openssl-{}".format(env["OPENSSL_VERSION"]))
-        env['OPENSSL_LIB_DIR'] = openssl_dir
-        env['OPENSSL_INCLUDE_DIR'] = path.join(openssl_dir, "include")
-        env['OPENSSL_STATIC'] = 'TRUE'
         # Android builds also require having the gcc bits on the PATH and various INCLUDE
         # path munging if you do not want to install a standalone NDK. See:
         # https://dxr.mozilla.org/mozilla-central/source/build/autoconf/android.m4#139-161
@@ -808,72 +729,133 @@ class CommandBase(object):
         env['PKG_CONFIG_ALLOW_CROSS'] = "1"
 
     @staticmethod
-    def build_like_command_arguments(original_function):
-        decorators = [
-            CommandArgumentGroup('Cross Compilation'),
-            CommandArgument(
-                '--target', '-t',
-                group="Cross Compilation",
-                default=None,
-                help='Cross compile for given target platform',
-            ),
-            CommandArgument(
-                '--android', default=None, action='store_true',
-                help='Build for Android. If --target is not specified, this '
-                     'will choose a default target architecture.',
-            ),
-            CommandArgument('--win-arm64', action='store_true', help="Use arm64 Windows target"),
-            CommandArgumentGroup('Feature Selection'),
-            CommandArgument(
-                '--features', default=None, group="Feature Selection", nargs='+',
-                help='Space-separated list of features to also build',
-            ),
-            CommandArgument(
-                '--media-stack', default=None, group="Feature Selection",
-                choices=["gstreamer", "dummy"], help='Which media stack to use',
-            ),
-            CommandArgument(
-                '--libsimpleservo',
-                default=None,
-                group="Feature Selection",
-                action='store_true',
-                help='Build the libsimpleservo library instead of the servo executable',
-            ),
-            CommandArgument(
-                '--debug-mozjs',
-                default=False,
-                group="Feature Selection",
-                action='store_true',
-                help='Enable debug assertions in mozjs',
-            ),
-            CommandArgument(
-                '--with-debug-assertions',
-                default=False,
-                group="Feature Selection",
-                action='store_true',
-                help='Enable debug assertions in release',
-            ),
-            CommandArgument(
-                '--with-frame-pointer',
-                default=None, group="Feature Selection",
-                action='store_true',
-                help='Build with frame pointer enabled, used by the background hang monitor.',
-            ),
-            CommandArgument('--without-wgl', group="Feature Selection", default=None, action='store_true'),
-        ]
+    def common_command_arguments(build_configuration=False, build_type=False):
+        decorators = []
+        if build_type:
+            decorators += [
+                CommandArgumentGroup('Build Type'),
+                CommandArgument('--release', '-r', group="Build Type",
+                                action='store_true',
+                                help='Build in release mode'),
+                CommandArgument('--dev', '--debug', '-d', group="Build Type",
+                                action='store_true',
+                                help='Build in development mode'),
+                CommandArgument('--prod', '--production', group="Build Type",
+                                action='store_true',
+                                help='Build in release mode without debug assertions'),
+                CommandArgument('--profile', group="Build Type",
+                                help='Build with custom Cargo profile'),
+            ]
 
-        def configuration_decorator(self, *args, **kwargs):
-            self.configure_cross_compilation(kwargs['target'], kwargs['android'], kwargs['win_arm64'])
+        if build_configuration:
+            decorators += [
+                CommandArgumentGroup('Cross Compilation'),
+                CommandArgument(
+                    '--target', '-t',
+                    group="Cross Compilation",
+                    default=None,
+                    help='Cross compile for given target platform',
+                ),
+                CommandArgument(
+                    '--android', default=None, action='store_true',
+                    help='Build for Android. If --target is not specified, this '
+                         'will choose a default target architecture.',
+                ),
+                CommandArgument('--win-arm64', action='store_true', help="Use arm64 Windows target"),
+                CommandArgumentGroup('Feature Selection'),
+                CommandArgument(
+                    '--features', default=None, group="Feature Selection", nargs='+',
+                    help='Space-separated list of features to also build',
+                ),
+                CommandArgument(
+                    '--media-stack', default=None, group="Feature Selection",
+                    choices=["gstreamer", "dummy"], help='Which media stack to use',
+                ),
+                CommandArgument(
+                    '--libsimpleservo',
+                    default=None,
+                    group="Feature Selection",
+                    action='store_true',
+                    help='Build the libsimpleservo library instead of the servo executable',
+                ),
+                CommandArgument(
+                    '--debug-mozjs',
+                    default=False,
+                    group="Feature Selection",
+                    action='store_true',
+                    help='Enable debug assertions in mozjs',
+                ),
+                CommandArgument(
+                    '--with-debug-assertions',
+                    default=False,
+                    group="Feature Selection",
+                    action='store_true',
+                    help='Enable debug assertions in release',
+                ),
+                CommandArgument(
+                    '--with-frame-pointer',
+                    default=None, group="Feature Selection",
+                    action='store_true',
+                    help='Build with frame pointer enabled, used by the background hang monitor.',
+                ),
+                CommandArgument('--without-wgl', group="Feature Selection", default=None, action='store_true'),
+            ]
 
-            self.features = kwargs.get("features", None) or []
-            self.configure_media_stack(kwargs['media_stack'])
-            return original_function(self, *args, **kwargs)
+        def decorator_function(original_function):
+            def configuration_decorator(self, *args, **kwargs):
+                if build_type:
+                    # If `build_type` already exists in kwargs we are doing a recursive dispatch.
+                    if 'build_type' not in kwargs:
+                        kwargs['build_type'] = self.configure_build_type(
+                            kwargs['release'], kwargs['dev'], kwargs['prod'], kwargs['profile'],
+                        )
+                    kwargs.pop('release', None)
+                    kwargs.pop('dev', None)
+                    kwargs.pop('prod', None)
+                    kwargs.pop('profile', None)
 
-        decorators.reverse()
-        decorated_function = configuration_decorator
-        for decorator in decorators:
-            decorated_function = decorator(decorated_function)
-        return decorated_function
+                if build_configuration:
+                    self.configure_cross_compilation(kwargs['target'], kwargs['android'], kwargs['win_arm64'])
+                    self.features = kwargs.get("features", None) or []
+                    self.configure_media_stack(kwargs['media_stack'])
+
+                return original_function(self, *args, **kwargs)
+
+            decorators.reverse()
+            for decorator in decorators:
+                decorator(configuration_decorator)
+
+            return configuration_decorator
+
+        return decorator_function
+
+    def configure_build_type(self, release: bool, dev: bool, prod: bool, profile: Optional[str]) -> BuildType:
+        option_count = release + dev + prod + (profile is not None)
+
+        if option_count > 1:
+            print("Please specify either --dev (-d) for a development")
+            print("  build, or --release (-r) for an optimized build,")
+            print("  or --profile PROFILE for a custom Cargo profile.")
+            sys.exit(1)
+        elif option_count < 1:
+            if self.config["build"]["mode"] == "dev":
+                print("No build type specified, but .servobuild specified `--dev`.")
+                return BuildType.dev()
+            elif self.config["build"]["mode"] == "release":
+                print("No build type specified, but .servobuild specified `--release`.")
+                return BuildType.release()
+            else:
+                print("No build type specified so assuming `--dev`.")
+                return BuildType.dev()
+
+        if release:
+            return BuildType.release()
+        elif dev:
+            return BuildType.dev()
+        elif prod:
+            return BuildType.prod()
+        else:
+            return BuildType.custom(profile)
 
     def configure_cross_compilation(
             self,
@@ -919,7 +901,8 @@ class CommandBase(object):
                 media_stack = "gstreamer"
             else:
                 media_stack = "dummy"
-        self.features += ["media-" + media_stack]
+        if media_stack != "dummy":
+            self.features += ["media-" + media_stack]
 
     def run_cargo_build_like_command(
         self, command: str, cargo_args: List[str],
@@ -927,7 +910,6 @@ class CommandBase(object):
         libsimpleservo=False,
         debug_mozjs=False, with_debug_assertions=False,
         with_frame_pointer=False, without_wgl=False,
-        with_layout_2020=False, with_layout_2013=False,
         **_kwargs
     ):
         env = env or self.build_env()
@@ -941,7 +923,7 @@ class CommandBase(object):
                     api = "capi"
                 port = path.join("libsimpleservo", api)
             else:
-                port = "winit"
+                port = "servoshell"
             args += [
                 "--manifest-path",
                 path.join(self.context.topdir, "ports", port, "Cargo.toml"),
@@ -953,8 +935,6 @@ class CommandBase(object):
             features = list(self.features)
             if self.config["build"]["debug-mozjs"] or debug_mozjs:
                 features.append("debugmozjs")
-
-            features.append("native-bluetooth")
 
             if with_frame_pointer:
                 env['RUSTFLAGS'] = env.get('RUSTFLAGS', "") + " -C force-frame-pointers=yes"
@@ -970,7 +950,7 @@ class CommandBase(object):
         if with_debug_assertions or self.config["build"]["debug-assertions"]:
             env['RUSTFLAGS'] = env.get('RUSTFLAGS', "") + " -C debug_assertions"
 
-        return self.call_rustup_run(["cargo", command] + args + cargo_args, env=env, verbose=verbose)
+        return call(["cargo", command] + args + cargo_args, env=env, verbose=verbose)
 
     def android_support_dir(self):
         return path.join(self.context.topdir, "support", "android")
@@ -1023,50 +1003,26 @@ class CommandBase(object):
             return True
         return False
 
-    def ensure_bootstrapped(self, rustup_components=None):
+    def ensure_bootstrapped(self):
         if self.context.bootstrapped:
             return
 
         servo.platform.get().passive_bootstrap()
 
-        if self.config["tools"]["use-rustup"]:
-            self.ensure_rustup_version()
-            toolchain = self.rust_toolchain()
-
-            status = subprocess.call(
-                ["rustup", "run", toolchain, "rustc", "--version"],
-                stdout=open(os.devnull, "wb"),
-                stderr=subprocess.STDOUT,
-            )
-            if status:
-                check_call(["rustup", "toolchain", "install", "--profile", "minimal", toolchain])
-
-            installed = check_output(
-                ["rustup", "component", "list", "--installed", "--toolchain", toolchain]
-            )
-            required_components = {
-                # For components/script_plugins, https://github.com/rust-lang/rust/pull/67469
-                "rustc-dev",
-                # https://github.com/rust-lang/rust/issues/72594#issuecomment-633779564
-                "llvm-tools-preview",
-            }
-            for component in set(rustup_components or []) | required_components:
-                if component.encode("utf-8") not in installed:
-                    check_call(["rustup", "component", "add", "--toolchain", toolchain, component])
-
-            needs_toolchain_install = self.cross_compile_target \
-                and self.cross_compile_target.encode("utf-8") not in check_output(
-                    ["rustup", "target", "list", "--installed", "--toolchain", toolchain]
-                )
-            if needs_toolchain_install:
-                check_call(["rustup", "target", "add", "--toolchain", toolchain, self.cross_compile_target])
+        needs_toolchain_install = self.cross_compile_target and \
+            self.cross_compile_target not in \
+            check_output(["rustup", "target", "list", "--installed"],
+                         cwd=self.context.topdir).decode()
+        if needs_toolchain_install:
+            check_call(["rustup", "target", "add", self.cross_compile_target],
+                       cwd=self.context.topdir)
 
         self.context.bootstrapped = True
 
     def ensure_rustup_version(self):
         try:
             version_line = subprocess.check_output(
-                ["rustup" + BIN_SUFFIX, "--version"],
+                ["rustup" + servo.platform.get().executable_suffix(), "--version"],
                 # Silence "info: This is the version for the rustup toolchain manager,
                 # not the rustc compiler."
                 stderr=open(os.devnull, "wb")
@@ -1079,7 +1035,7 @@ class CommandBase(object):
                 sys.exit(1)
             raise
         version = tuple(map(int, re.match(br"rustup (\d+)\.(\d+)\.(\d+)", version_line).groups()))
-        version_needed = (1, 21, 0)
+        version_needed = (1, 23, 0)
         if version < version_needed:
             print("rustup is at version %s.%s.%s, Servo requires %s.%s.%s or more recent." % (version + version_needed))
             print("Try running 'rustup self update'.")

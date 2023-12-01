@@ -7,7 +7,6 @@
 # option. This file may not be copied, modified, or distributed
 # except according to those terms.
 
-from __future__ import print_function, unicode_literals
 from os import path, listdir, getcwd
 
 import signal
@@ -23,7 +22,17 @@ from mach.decorators import (
 )
 
 from servo.command_base import CommandBase, cd, call
-from servo.util import get_static_rust_lang_org_dist, get_urlopen_kwargs
+
+VALID_TRY_BRACHES = [
+    "try",
+    "try-linux",
+    "try-mac",
+    "try-windows",
+    "try-wpt",
+    "try-wpt-2020",
+    "try-wpt-mac",
+    "try-wpt-mac-2020"
+]
 
 
 @CommandProvider
@@ -34,7 +43,7 @@ class MachCommands(CommandBase):
     @CommandArgument(
         'params', default=None, nargs='...',
         help="Command-line arguments to be passed through to cargo check")
-    @CommandBase.build_like_command_arguments
+    @CommandBase.common_command_arguments(build_configuration=True, build_type=False)
     def check(self, params, **kwargs):
         if not params:
             params = []
@@ -98,7 +107,7 @@ class MachCommands(CommandBase):
 
         self.ensure_bootstrapped()
         with cd(self.context.topdir):
-            self.call_rustup_run(["cargo", "update"] + params, env=self.build_env())
+            call(["cargo", "update"] + params, env=self.build_env())
 
     @Command('rustc',
              description='Run the Rust compiler',
@@ -111,7 +120,7 @@ class MachCommands(CommandBase):
             params = []
 
         self.ensure_bootstrapped()
-        return self.call_rustup_run(["rustc"] + params, env=self.build_env())
+        return call(["rustc"] + params, env=self.build_env())
 
     @Command('cargo-fix',
              description='Run "cargo fix"',
@@ -119,7 +128,7 @@ class MachCommands(CommandBase):
     @CommandArgument(
         'params', default=None, nargs='...',
         help="Command-line arguments to be passed through to cargo-fix")
-    @CommandBase.build_like_command_arguments
+    @CommandBase.common_command_arguments(build_configuration=True, build_type=False)
     def cargo_fix(self, params, **kwargs):
         if not params:
             params = []
@@ -134,7 +143,7 @@ class MachCommands(CommandBase):
     @CommandArgument(
         'params', default=None, nargs='...',
         help="Command-line arguments to be passed through to cargo-clippy")
-    @CommandBase.build_like_command_arguments
+    @CommandBase.common_command_arguments(build_configuration=True, build_type=False)
     def cargo_clippy(self, params, **kwargs):
         if not params:
             params = []
@@ -172,12 +181,18 @@ class MachCommands(CommandBase):
              description='Update the Rust version to latest Nightly',
              category='devenv')
     def rustup(self):
-        url = get_static_rust_lang_org_dist() + "/channel-rust-nightly-date.txt"
-        nightly_date = urllib.request.urlopen(url, **get_urlopen_kwargs()).read()
-        toolchain = b"nightly-" + nightly_date
-        filename = path.join(self.context.topdir, "rust-toolchain")
-        with open(filename, "wb") as f:
-            f.write(toolchain + b"\n")
+        nightly_date = urllib.request.urlopen(
+            "https://static.rust-lang.org/dist/channel-rust-nightly-date.txt").read()
+        new_toolchain = f"nightly-{nightly_date.decode('utf-8')}"
+        old_toolchain = self.rust_toolchain()
+
+        filename = path.join(self.context.topdir, "rust-toolchain.toml")
+        with open(filename, "r", encoding="utf-8") as file:
+            contents = file.read()
+        contents = contents.replace(old_toolchain, new_toolchain)
+        with open(filename, "w", encoding="utf-8") as file:
+            file.write(contents)
+
         self.ensure_bootstrapped()
 
     @Command('fetch',
@@ -185,9 +200,7 @@ class MachCommands(CommandBase):
              category='devenv')
     def fetch(self):
         self.ensure_bootstrapped()
-
-        with cd(self.context.topdir):
-            return self.call_rustup_run(["cargo", "fetch"], env=self.build_env())
+        return call(["cargo", "fetch"], env=self.build_env())
 
     @Command('ndk-stack',
              description='Invoke the ndk-stack tool with the expected symbol paths',
@@ -279,7 +292,6 @@ class MachCommands(CommandBase):
     def try_jobs(self, jobs):
         branches = []
         # we validate branches because force pushing is destructive
-        VALID_TRY_BRACHES = ["try", "try-linux", "try-mac", "try-windows", "try-wpt", "try-wpt-2020"]
         for job in jobs:
             # branches must start with try-
             if "try" not in job:

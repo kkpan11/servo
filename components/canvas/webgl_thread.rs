@@ -2,92 +2,54 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
-use crate::webgl_limits::GLLimitsDetect;
-use byteorder::{ByteOrder, NativeEndian, WriteBytesExt};
-use canvas_traits::webgl;
-use canvas_traits::webgl::webgl_channel;
-use canvas_traits::webgl::ActiveAttribInfo;
-use canvas_traits::webgl::ActiveUniformBlockInfo;
-use canvas_traits::webgl::ActiveUniformInfo;
-use canvas_traits::webgl::AlphaTreatment;
-use canvas_traits::webgl::GLContextAttributes;
-use canvas_traits::webgl::GLLimits;
-use canvas_traits::webgl::GlType;
-use canvas_traits::webgl::InternalFormatIntVec;
-use canvas_traits::webgl::ProgramLinkInfo;
-use canvas_traits::webgl::TexDataType;
-use canvas_traits::webgl::TexFormat;
-use canvas_traits::webgl::WebGLBufferId;
-use canvas_traits::webgl::WebGLChan;
-use canvas_traits::webgl::WebGLCommand;
-use canvas_traits::webgl::WebGLCommandBacktrace;
-use canvas_traits::webgl::WebGLContextId;
-use canvas_traits::webgl::WebGLCreateContextResult;
-use canvas_traits::webgl::WebGLFramebufferBindingRequest;
-use canvas_traits::webgl::WebGLFramebufferId;
-use canvas_traits::webgl::WebGLMsg;
-use canvas_traits::webgl::WebGLMsgSender;
-use canvas_traits::webgl::WebGLProgramId;
-use canvas_traits::webgl::WebGLQueryId;
-use canvas_traits::webgl::WebGLReceiver;
-use canvas_traits::webgl::WebGLRenderbufferId;
-use canvas_traits::webgl::WebGLSLVersion;
-use canvas_traits::webgl::WebGLSamplerId;
-use canvas_traits::webgl::WebGLSender;
-use canvas_traits::webgl::WebGLShaderId;
-use canvas_traits::webgl::WebGLSyncId;
-use canvas_traits::webgl::WebGLTextureId;
-use canvas_traits::webgl::WebGLVersion;
-use canvas_traits::webgl::WebGLVertexArrayId;
-use canvas_traits::webgl::WebXRCommand;
-use canvas_traits::webgl::WebXRLayerManagerId;
-use canvas_traits::webgl::YAxisTreatment;
-use euclid::default::Size2D;
-use fnv::FnvHashMap;
-use half::f16;
-use pixels::{self, PixelFormat};
-use sparkle::gl;
-use sparkle::gl::GLint;
-use sparkle::gl::GLuint;
-use sparkle::gl::Gl;
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::rc::Rc;
-use std::slice;
 use std::sync::{Arc, Mutex};
-use std::thread;
-use surfman;
-use surfman::Adapter;
-use surfman::Connection;
-use surfman::Context;
-use surfman::ContextAttributeFlags;
-use surfman::ContextAttributes;
-use surfman::Device;
-use surfman::GLVersion;
-use surfman::SurfaceAccess;
-use surfman::SurfaceInfo;
-use surfman::SurfaceType;
-use surfman_chains::SwapChains;
-use surfman_chains_api::SwapChainsAPI;
+use std::{slice, thread};
+
+use bitflags::bitflags;
+use byteorder::{ByteOrder, NativeEndian, WriteBytesExt};
+use canvas_traits::webgl;
+use canvas_traits::webgl::{
+    webgl_channel, ActiveAttribInfo, ActiveUniformBlockInfo, ActiveUniformInfo, AlphaTreatment,
+    GLContextAttributes, GLLimits, GlType, InternalFormatIntVec, ProgramLinkInfo, TexDataType,
+    TexFormat, WebGLBufferId, WebGLChan, WebGLCommand, WebGLCommandBacktrace, WebGLContextId,
+    WebGLCreateContextResult, WebGLFramebufferBindingRequest, WebGLFramebufferId, WebGLMsg,
+    WebGLMsgSender, WebGLProgramId, WebGLQueryId, WebGLReceiver, WebGLRenderbufferId,
+    WebGLSLVersion, WebGLSamplerId, WebGLSender, WebGLShaderId, WebGLSyncId, WebGLTextureId,
+    WebGLVersion, WebGLVertexArrayId, WebXRCommand, WebXRLayerManagerId, YAxisTreatment,
+};
+use euclid::default::Size2D;
+use fnv::FnvHashMap;
+use half::f16;
+use log::{debug, error, trace, warn};
+use pixels::{self, PixelFormat};
+use sparkle::gl;
+use sparkle::gl::{GLint, GLuint, Gl};
+use surfman::chains::{PreserveBuffer, SwapChains, SwapChainsAPI};
+use surfman::{
+    self, Adapter, Connection, Context, ContextAttributeFlags, ContextAttributes, Device,
+    GLVersion, SurfaceAccess, SurfaceInfo, SurfaceType,
+};
+use webrender::{RenderApi, RenderApiSender, Transaction};
+use webrender_api::units::DeviceIntSize;
 use webrender_api::{
-    units::DeviceIntSize, DirtyRect, DocumentId, ExternalImageData, ExternalImageId,
-    ExternalImageType, ImageData, ImageDescriptor, ImageDescriptorFlags, ImageFormat, ImageKey,
-    RenderApi, RenderApiSender, TextureTarget, Transaction,
+    DirtyRect, DocumentId, ExternalImageData, ExternalImageId, ExternalImageType, ImageBufferKind,
+    ImageData, ImageDescriptor, ImageDescriptorFlags, ImageFormat, ImageKey,
 };
 use webrender_traits::{WebrenderExternalImageRegistry, WebrenderImageHandlerType};
 use webxr::SurfmanGL as WebXRSurfman;
-use webxr_api::ContextId as WebXRContextId;
-use webxr_api::Error as WebXRError;
-use webxr_api::GLContexts as WebXRContexts;
-use webxr_api::GLTypes as WebXRTypes;
-use webxr_api::LayerGrandManager as WebXRLayerGrandManager;
-use webxr_api::LayerGrandManagerAPI as WebXRLayerGrandManagerAPI;
-use webxr_api::LayerId as WebXRLayerId;
-use webxr_api::LayerInit as WebXRLayerInit;
-use webxr_api::LayerManager as WebXRLayerManager;
-use webxr_api::LayerManagerAPI as WebXRLayerManagerAPI;
-use webxr_api::LayerManagerFactory as WebXRLayerManagerFactory;
-use webxr_api::SubImages as WebXRSubImages;
+use webxr_api::{
+    ContextId as WebXRContextId, Error as WebXRError, GLContexts as WebXRContexts,
+    GLTypes as WebXRTypes, LayerGrandManager as WebXRLayerGrandManager,
+    LayerGrandManagerAPI as WebXRLayerGrandManagerAPI, LayerId as WebXRLayerId,
+    LayerInit as WebXRLayerInit, LayerManager as WebXRLayerManager,
+    LayerManagerAPI as WebXRLayerManagerAPI, LayerManagerFactory as WebXRLayerManagerFactory,
+    SubImages as WebXRSubImages,
+};
+
+use crate::webgl_limits::GLLimitsDetect;
 
 #[cfg(feature = "xr-profile")]
 fn to_ms(ns: u64) -> f64 {
@@ -614,7 +576,7 @@ impl WebGLThread {
         let descriptor_attributes = self.device.context_descriptor_attributes(&descriptor);
         let gl_version = descriptor_attributes.version;
         let has_alpha = requested_flags.contains(ContextAttributeFlags::ALPHA);
-        let texture_target = current_wr_texture_target(&self.device);
+        let image_buffer_kind = current_wr_image_buffer_kind(&self.device);
 
         self.device.make_context_current(&ctx).unwrap();
         let framebuffer = self
@@ -673,7 +635,7 @@ impl WebGLThread {
             size.to_i32(),
             has_alpha,
             id,
-            texture_target,
+            image_buffer_kind,
         );
 
         self.cached_context_info
@@ -722,25 +684,13 @@ impl WebGLThread {
 
         // Reset framebuffer bindings as appropriate.
         framebuffer_rebinding_info.apply(&self.device, &data.ctx, &*data.gl);
+        debug_assert_eq!(data.gl.get_error(), gl::NO_ERROR);
 
-        // Update WR image if needed.
-        let info = self.cached_context_info.get_mut(&context_id).unwrap();
         let has_alpha = data
             .state
             .requested_flags
             .contains(ContextAttributeFlags::ALPHA);
-        let texture_target = current_wr_texture_target(&self.device);
-        Self::update_wr_external_image(
-            &mut self.webrender_api,
-            self.webrender_doc,
-            size.to_i32(),
-            has_alpha,
-            context_id,
-            info.image_key,
-            texture_target,
-        );
-
-        debug_assert_eq!(data.gl.get_error(), gl::NO_ERROR);
+        self.update_wr_image_for_context(context_id, size.to_i32(), has_alpha);
 
         Ok(())
     }
@@ -829,9 +779,9 @@ impl WebGLThread {
                     &mut self.device,
                     &mut data.ctx,
                     if data.attributes.preserve_drawing_buffer {
-                        surfman_chains::PreserveBuffer::Yes(&*data.gl)
+                        PreserveBuffer::Yes(&*data.gl)
                     } else {
-                        surfman_chains::PreserveBuffer::No
+                        PreserveBuffer::No
                     },
                 )
                 .unwrap();
@@ -856,6 +806,7 @@ impl WebGLThread {
             debug_assert_eq!(data.gl.get_error(), gl::NO_ERROR);
 
             let SurfaceInfo {
+                size,
                 framebuffer_object,
                 id,
                 ..
@@ -868,6 +819,12 @@ impl WebGLThread {
                 "... rebound framebuffer {}, new back buffer surface is {:?}",
                 framebuffer_object, id
             );
+
+            let has_alpha = data
+                .state
+                .requested_flags
+                .contains(ContextAttributeFlags::ALPHA);
+            self.update_wr_image_for_context(context_id, size, has_alpha);
         }
 
         #[allow(unused)]
@@ -933,10 +890,10 @@ impl WebGLThread {
         size: Size2D<i32>,
         alpha: bool,
         context_id: WebGLContextId,
-        target: TextureTarget,
+        image_buffer_kind: ImageBufferKind,
     ) -> ImageKey {
         let descriptor = Self::image_descriptor(size, alpha);
-        let data = Self::external_image_data(context_id, target);
+        let data = Self::external_image_data(context_id, image_buffer_kind);
 
         let image_key = webrender_api.generate_image_key();
         let mut txn = Transaction::new();
@@ -946,22 +903,23 @@ impl WebGLThread {
         image_key
     }
 
-    /// Updates a `ImageKey` that uses shared textures.
-    fn update_wr_external_image(
-        webrender_api: &mut RenderApi,
-        webrender_doc: DocumentId,
-        size: Size2D<i32>,
-        alpha: bool,
+    /// Tell WebRender to invalidate any cached tiles for a given `WebGLContextId`
+    /// when the underlying surface has changed e.g due to resize or buffer swap
+    fn update_wr_image_for_context(
+        &mut self,
         context_id: WebGLContextId,
-        image_key: ImageKey,
-        target: TextureTarget,
+        size: Size2D<i32>,
+        has_alpha: bool,
     ) {
-        let descriptor = Self::image_descriptor(size, alpha);
-        let data = Self::external_image_data(context_id, target);
+        let info = self.cached_context_info.get(&context_id).unwrap();
+        let image_buffer_kind = current_wr_image_buffer_kind(&self.device);
+
+        let descriptor = Self::image_descriptor(size, has_alpha);
+        let image_data = Self::external_image_data(context_id, image_buffer_kind);
 
         let mut txn = Transaction::new();
-        txn.update_image(image_key, descriptor, data, &DirtyRect::All);
-        webrender_api.send_transaction(webrender_doc, txn);
+        txn.update_image(info.image_key, descriptor, image_data, &DirtyRect::All);
+        self.webrender_api.send_transaction(self.webrender_doc, txn);
     }
 
     /// Helper function to create a `ImageDescriptor`.
@@ -978,11 +936,14 @@ impl WebGLThread {
     }
 
     /// Helper function to create a `ImageData::External` instance.
-    fn external_image_data(context_id: WebGLContextId, target: TextureTarget) -> ImageData {
+    fn external_image_data(
+        context_id: WebGLContextId,
+        image_buffer_kind: ImageBufferKind,
+    ) -> ImageData {
         let data = ExternalImageData {
             id: ExternalImageId(context_id.0 as u64),
             channel_index: 0,
-            image_type: ExternalImageType::TextureHandle(target),
+            image_type: ExternalImageType::TextureHandle(image_buffer_kind),
         };
         ImageData::External(data)
     }
@@ -1012,10 +973,10 @@ struct WebGLContextInfo {
 }
 
 // TODO(pcwalton): Add `GL_TEXTURE_EXTERNAL_OES`?
-fn current_wr_texture_target(device: &Device) -> TextureTarget {
+fn current_wr_image_buffer_kind(device: &Device) -> ImageBufferKind {
     match device.surface_gl_texture_target() {
-        gl::TEXTURE_RECTANGLE => TextureTarget::Rect,
-        _ => TextureTarget::Default,
+        gl::TEXTURE_RECTANGLE => ImageBufferKind::TextureRect,
+        _ => ImageBufferKind::Texture2D,
     }
 }
 
@@ -2147,9 +2108,12 @@ impl WebGLImpl {
                         error!("JS backtrace from failed WebGL API:\n{}", backtrace);
                     }
                 }
-                panic!(
-                    "Unexpected WebGL error: 0x{:x} ({}) [{:?}]",
-                    error, error, command
+                // TODO(servo#30568) revert to panic!() once underlying bug is fixed
+                log::warn!(
+                    "debug assertion failed! Unexpected WebGL error: 0x{:x} ({}) [{:?}]",
+                    error,
+                    error,
+                    command
                 );
             }
         }

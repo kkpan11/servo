@@ -59,7 +59,28 @@ def toStringBool(arg):
 
 
 def toBindingNamespace(arg):
+    """
+    Namespaces are *_Bindings
+
+    actual path is `codegen::Bindings::{toBindingModuleFile(name)}::{toBindingNamespace(name)}`
+    """
+    return re.sub("((_workers)?$)", "_Binding\\1", MakeNativeName(arg))
+
+
+def toBindingModuleFile(arg):
+    """
+    Module files are *Bindings
+
+    actual path is `codegen::Bindings::{toBindingModuleFile(name)}::{toBindingNamespace(name)}`
+    """
     return re.sub("((_workers)?$)", "Binding\\1", MakeNativeName(arg))
+
+
+def toBindingModuleFileFromDescriptor(desc):
+    if desc.maybeGetSuperModule() is not None:
+        return toBindingModuleFile(desc.maybeGetSuperModule())
+    else:
+        return toBindingModuleFile(desc.name)
 
 
 def stripTrailingWhitespace(text):
@@ -733,7 +754,8 @@ def getJSToNativeConversionInfo(type, descriptorProvider, failureCode=None,
                     enum,
                     getEnumValueName(defaultValue.value))
             else:
-                raise("We don't currently support default values that aren't null, boolean or default dictionary")
+                raise NotImplementedError("We don't currently support default values that aren't \
+                                          null, boolean or default dictionary")
         elif dictionaries:
             if defaultValue:
                 assert isinstance(defaultValue, IDLDefaultDictionaryValue)
@@ -2877,7 +2899,7 @@ assert!(%(copyFunc)s(*cx, %(obj)s.handle(), unforgeable_holder.handle()));
 
 class CGWrapMethod(CGAbstractMethod):
     """
-    Class that generates the FooBinding::Wrap function for non-callback
+    Class that generates the Foo_Binding::Wrap function for non-callback
     interfaces.
     """
     def __init__(self, descriptor):
@@ -2977,7 +2999,7 @@ DomRoot::from_ref(&*root)\
 
 class CGWrapGlobalMethod(CGAbstractMethod):
     """
-    Class that generates the FooBinding::Wrap function for global interfaces.
+    Class that generates the Foo_Binding::Wrap function for global interfaces.
     """
     def __init__(self, descriptor, properties):
         assert not descriptor.interface.isCallback()
@@ -3259,19 +3281,24 @@ class CGCreateInterfaceObjectsMethod(CGAbstractMethod):
                 methods = self.properties.static_methods.variableName()
             else:
                 methods = "&[]"
-            return CGGeneric("""\
-rooted!(in(*cx) let proto = %(proto)s);
+            if self.descriptor.interface.hasConstants():
+                constants = "sConstants"
+            else:
+                constants = "&[]"
+            id = MakeNativeName(name)
+            return CGGeneric(f"""\
+rooted!(in(*cx) let proto = {proto});
 assert!(!proto.is_null());
 rooted!(in(*cx) let mut namespace = ptr::null_mut::<JSObject>());
 create_namespace_object(cx, global, proto.handle(), &NAMESPACE_OBJECT_CLASS,
-                        %(methods)s, %(name)s, namespace.handle_mut());
+                        {methods}, {constants}, {str_to_const_array(name)}, namespace.handle_mut());
 assert!(!namespace.is_null());
-assert!((*cache)[PrototypeList::Constructor::%(id)s as usize].is_null());
-(*cache)[PrototypeList::Constructor::%(id)s as usize] = namespace.get();
-<*mut JSObject>::post_barrier((*cache).as_mut_ptr().offset(PrototypeList::Constructor::%(id)s as isize),
+assert!((*cache)[PrototypeList::Constructor::{id} as usize].is_null());
+(*cache)[PrototypeList::Constructor::{id} as usize] = namespace.get();
+<*mut JSObject>::post_barrier((*cache).as_mut_ptr().offset(PrototypeList::Constructor::{id} as isize),
                               ptr::null_mut(),
                               namespace.get());
-""" % {"id": MakeNativeName(name), "methods": methods, "name": str_to_const_array(name), "proto": proto})
+""")
         if self.descriptor.interface.isCallback():
             assert not self.descriptor.interface.ctor() and self.descriptor.interface.hasConstants()
             return CGGeneric("""\
@@ -3805,7 +3832,9 @@ class CGPerSignatureCall(CGThing):
         if idlNode.isMethod() and idlNode.isMaplikeOrSetlikeOrIterableMethod():
             if idlNode.maplikeOrSetlikeOrIterable.isMaplike() or \
                idlNode.maplikeOrSetlikeOrIterable.isSetlike():
-                raise TypeError('Maplike/Setlike methods are not supported yet')
+                cgThings.append(CGMaplikeOrSetlikeMethodGenerator(descriptor,
+                                                                  idlNode.maplikeOrSetlikeOrIterable,
+                                                                  idlNode.identifier.name))
             else:
                 cgThings.append(CGIterableMethodGenerator(descriptor,
                                                           idlNode.maplikeOrSetlikeOrIterable,
@@ -5655,7 +5684,7 @@ class CGDOMJSProxyHandler_defineProperty(CGAbstractExternMethod):
             set += ("if id.is_string() || id.is_int() {\n"
                     + CGIndenter(CGProxyNamedGetter(self.descriptor)).define()
                     + "    if result.is_some() {\n"
-                      "        return (*opresult).failNoNamedSetter();\n"
+                      "        return (*opresult).fail_no_named_setter();\n"
                       "    }\n"
                       "}\n")
         set += "return proxyhandler::define_property(*cx, %s);" % ", ".join(a.name for a in self.args[1:])
@@ -6020,11 +6049,11 @@ class CGDOMJSProxyHandler_getPrototype(CGAbstractExternMethod):
 class CGDOMJSProxyHandler_className(CGAbstractExternMethod):
     def __init__(self, descriptor):
         args = [Argument('*mut JSContext', 'cx'), Argument('RawHandleObject', '_proxy')]
-        CGAbstractExternMethod.__init__(self, descriptor, "className", "*const i8", args, doesNotPanic=True)
+        CGAbstractExternMethod.__init__(self, descriptor, "className", "*const libc::c_char", args, doesNotPanic=True)
         self.descriptor = descriptor
 
     def getBody(self):
-        return '%s as *const u8 as *const i8' % str_to_const_array(self.descriptor.name)
+        return '%s as *const u8 as *const libc::c_char' % str_to_const_array(self.descriptor.name)
 
     def definition_body(self):
         return CGGeneric(self.getBody())
@@ -6490,6 +6519,8 @@ def generate_imports(config, cgthings, descriptors, callbacks=None, dictionaries
         'crate::dom::bindings::htmlconstructor::push_new_element_queue',
         'crate::dom::bindings::iterable::Iterable',
         'crate::dom::bindings::iterable::IteratorType',
+        'crate::dom::bindings::like::Setlike',
+        'crate::dom::bindings::like::Maplike',
         'crate::dom::bindings::namespace::NamespaceObjectClass',
         'crate::dom::bindings::namespace::create_namespace_object',
         'crate::dom::bindings::reflector::MutDomObject',
@@ -6875,7 +6906,7 @@ class CGDictionary(CGThing):
         derive = ["JSTraceable"]
         mustRoot = ""
         if self.membersNeedTracing():
-            mustRoot = "#[unrooted_must_root_lint::must_root]\n"
+            mustRoot = "#[crown::unrooted_must_root_lint::must_root]\n"
             if not self.hasRequiredFields(self.dictionary):
                 derive += ["Default"]
 
@@ -7131,10 +7162,10 @@ class CGRegisterProxyHandlersMethod(CGAbstractMethod):
     def definition_body(self):
         return CGList([
             CGGeneric("proxy_handlers::%s.store(\n"
-                      "    Bindings::%s::DefineProxyHandler() as *mut _,\n"
+                      "    Bindings::%s::%s::DefineProxyHandler() as *mut _,\n"
                       "    std::sync::atomic::Ordering::Release,\n"
                       ");"
-                      % (desc.name, '::'.join([desc.name + 'Binding'] * 2)))
+                      % (desc.name, toBindingModuleFile(desc.name), toBindingNamespace(desc.name)))
             for desc in self.descriptors
         ], "\n")
 
@@ -7419,7 +7450,7 @@ class CGCallback(CGClass):
                          constructors=self.getConstructors(),
                          methods=realMethods,
                          decorators="#[derive(JSTraceable, PartialEq)]\n"
-                                    "#[unrooted_must_root_lint::allow_unrooted_interior]")
+                                    "#[crown::unrooted_must_root_lint::allow_unrooted_interior]")
 
     def getConstructors(self):
         return [ClassConstructor(
@@ -7862,6 +7893,77 @@ class CallbackOperation(CallbackOperationBase):
                                        descriptor, descriptor.interface.isSingleOperationInterface())
 
 
+class CGMaplikeOrSetlikeMethodGenerator(CGGeneric):
+    """
+    Creates methods for *like interfaces. Unwrapping/wrapping
+    will be taken care of by the usual method generation machinery in
+    CGMethodCall/CGPerSignatureCall. Functionality is filled in here instead of
+    using CGCallGenerator.
+    """
+    def __init__(self, descriptor, likeable, methodName):
+        trait: str
+        if likeable.isSetlike():
+            trait = "Setlike"
+        elif likeable.isMaplike():
+            trait = "Maplike"
+        else:
+            raise TypeError("CGMaplikeOrSetlikeMethodGenerator is only for Setlike/Maplike")
+        """
+        setlike:
+            fn size(&self) -> usize;
+            fn add(&self, key: Self::Key);
+            fn has(&self, key: &Self::Key) -> bool;
+            fn clear(&self);
+            fn delete(&self, key: &Self::Key) -> bool;
+        maplike:
+            fn get(&self, key: Self::Key) -> Self::Value;
+            fn size(&self) -> usize;
+            fn set(&self, key: Self::Key, value: Self::Value);
+            fn has(&self, key: &Self::Key) -> bool;
+            fn clear(&self);
+            fn delete(&self, key: &Self::Key) -> bool;
+        like iterable:
+            keys/values/entries/forEach
+        """
+        # like iterables are implemented seperatly as we are actually implementing them
+        if methodName in ["keys", "values", "entries", "forEach"]:
+            CGIterableMethodGenerator.__init__(self, descriptor, likeable, methodName)
+        elif methodName in ["size", "clear"]:  # zero arguments
+            CGGeneric.__init__(self, fill(
+                """
+                let result = ${trt}::${method}(&*this);
+                """,
+                trt=trait,
+                method=methodName.lower()))
+        elif methodName == "add":  # special case one argumet
+            CGGeneric.__init__(self, fill(
+                """
+                ${trt}::${method}(&*this, arg0);
+                // Returns itself per https://webidl.spec.whatwg.org/#es-set-add
+                let result = this;
+                """,
+                trt=trait,
+                method=methodName))
+        elif methodName in ["has", "delete", "get"]:  # one argument
+            CGGeneric.__init__(self, fill(
+                """
+                let result = ${trt}::${method}(&*this, arg0);
+                """,
+                trt=trait,
+                method=methodName))
+        elif methodName == "set":  # two arguments
+            CGGeneric.__init__(self, fill(
+                """
+                ${trt}::${method}(&*this, arg0, arg1);
+                // Returns itself per https://webidl.spec.whatwg.org/#es-map-set
+                let result = this;
+                """,
+                trt=trait,
+                method=methodName))
+        else:
+            raise TypeError(f"Do not know how to impl *like method: {methodName}")
+
+
 class CGIterableMethodGenerator(CGGeneric):
     """
     Creates methods for iterable interfaces. Unwrapping/wrapping
@@ -7964,8 +8066,8 @@ class GlobalGenRoots():
         global_flags = CGWrapper(CGIndenter(CGList([
             CGGeneric("const %s = %#x;" % args)
             for args in flags
-        ], "\n")), pre="pub struct Globals: u8 {\n", post="\n}")
-        globals_ = CGWrapper(CGIndenter(global_flags), pre="bitflags! {\n", post="\n}")
+        ], "\n")), pre="#[derive(Clone, Copy)]\npub struct Globals: u8 {\n", post="\n}")
+        globals_ = CGWrapper(CGIndenter(global_flags), pre="bitflags::bitflags! {\n", post="\n}")
 
         phf = CGGeneric("include!(concat!(env!(\"OUT_DIR\"), \"/InterfaceObjectMapPhf.rs\"));")
 
@@ -7978,12 +8080,13 @@ class GlobalGenRoots():
     def InterfaceObjectMapData(config):
         pairs = []
         for d in config.getDescriptors(hasInterfaceObject=True, isInline=False):
-            binding = toBindingNamespace(d.name)
-            pairs.append((d.name, binding, binding))
+            binding_mod = toBindingModuleFileFromDescriptor(d)
+            binding_ns = toBindingNamespace(d.name)
+            pairs.append((d.name, binding_mod, binding_ns))
             for alias in d.interface.legacyWindowAliases:
-                pairs.append((alias, binding, binding))
+                pairs.append((alias, binding_mod, binding_ns))
             for ctor in d.interface.legacyFactoryFunctions:
-                pairs.append((ctor.identifier.name, binding, binding))
+                pairs.append((ctor.identifier.name, binding_mod, binding_ns))
         pairs.sort(key=operator.itemgetter(0))
         mappings = [
             CGGeneric('"%s": "codegen::Bindings::%s::%s::DefineDOMInterface"' % pair)
@@ -8051,7 +8154,7 @@ class GlobalGenRoots():
             return getModuleFromObject(d).split('::')[-1]
 
         descriptors = config.getDescriptors(register=True, isIteratorInterface=False)
-        descriptors = (set(toBindingNamespace(d.name) for d in descriptors)
+        descriptors = (set(toBindingModuleFile(d.name) for d in descriptors if d.maybeGetSuperModule() is None)
                        | set(leafModule(d) for d in config.callbacks)
                        | set(leafModule(d) for d in config.getDictionaries()))
         curr = CGList([CGGeneric("pub mod %s;\n" % name) for name in sorted(descriptors)])

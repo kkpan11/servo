@@ -2,6 +2,75 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
+use std::borrow::Cow;
+use std::cell::Cell;
+use std::cmp::Ordering;
+use std::collections::hash_map::Entry::{Occupied, Vacant};
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::default::Default;
+use std::mem;
+use std::ptr::NonNull;
+use std::rc::Rc;
+use std::slice::from_ref;
+use std::time::{Duration, Instant};
+
+use canvas_traits::webgl::{self, WebGLContextId, WebGLMsg};
+use content_security_policy::{self as csp, CspList};
+use cookie::Cookie;
+use cssparser::match_ignore_ascii_case;
+use devtools_traits::ScriptToDevtoolsControlMsg;
+use dom_struct::dom_struct;
+use embedder_traits::EmbedderMsg;
+use encoding_rs::{Encoding, UTF_8};
+use euclid::default::{Point2D, Rect, Size2D};
+use html5ever::{local_name, namespace_url, ns, LocalName, Namespace, QualName};
+use hyper_serde::Serde;
+use ipc_channel::ipc::{self, IpcSender};
+use js::jsapi::JSObject;
+use js::rust::HandleObject;
+use keyboard_types::{Code, Key, KeyState};
+use lazy_static::lazy_static;
+use metrics::{
+    InteractiveFlag, InteractiveMetrics, InteractiveWindow, ProfilerMetadataFactory,
+    ProgressiveWebMetric,
+};
+use mime::{self, Mime};
+use msg::constellation_msg::BrowsingContextId;
+use net_traits::pub_domains::is_pub_domain;
+use net_traits::request::RequestBuilder;
+use net_traits::response::HttpsState;
+use net_traits::CookieSource::NonHTTP;
+use net_traits::CoreResourceMsg::{GetCookiesForUrl, SetCookiesForUrl};
+use net_traits::{FetchResponseMsg, IpcSend, ReferrerPolicy};
+use num_traits::ToPrimitive;
+use percent_encoding::percent_decode;
+use profile_traits::ipc as profile_ipc;
+use profile_traits::time::{TimerMetadata, TimerMetadataFrameType, TimerMetadataReflowType};
+use script_layout_interface::message::{Msg, PendingRestyle, ReflowGoal};
+use script_layout_interface::TrustedNodeAddress;
+use script_traits::{
+    AnimationState, DocumentActivity, MouseButton, MouseEventType, MsDuration, ScriptMsg,
+    TouchEventType, TouchId, UntrustedNodeAddress, WheelDelta,
+};
+use servo_arc::Arc;
+use servo_atoms::Atom;
+use servo_config::pref;
+use servo_media::{ClientContextId, ServoMedia};
+use servo_url::{ImmutableOrigin, MutableOrigin, ServoUrl};
+use style::attr::AttrValue;
+use style::context::QuirksMode;
+use style::invalidation::element::restyle_hints::RestyleHint;
+use style::media_queries::{Device, MediaType};
+use style::selector_parser::Snapshot;
+use style::shared_lock::SharedRwLock as StyleSharedRwLock;
+use style::str::{split_html_space_chars, str_join};
+use style::stylesheet_set::DocumentStylesheetSet;
+use style::stylesheets::{Origin, OriginSet, Stylesheet};
+use url::Host;
+use uuid::Uuid;
+use webrender_api::units::DeviceIntRect;
+
+use super::bindings::trace::{HashMapTracedValues, NoTrace};
 use crate::animation_timeline::AnimationTimeline;
 use crate::animations::Animations;
 use crate::document_loader::{DocumentLoader, LoadType};
@@ -9,15 +78,15 @@ use crate::dom::attr::Attr;
 use crate::dom::beforeunloadevent::BeforeUnloadEvent;
 use crate::dom::bindings::callback::ExceptionHandling;
 use crate::dom::bindings::cell::{ref_filter_map, DomRefCell, Ref, RefMut};
-use crate::dom::bindings::codegen::Bindings::BeforeUnloadEventBinding::BeforeUnloadEventBinding::BeforeUnloadEventMethods;
+use crate::dom::bindings::codegen::Bindings::BeforeUnloadEventBinding::BeforeUnloadEvent_Binding::BeforeUnloadEventMethods;
 use crate::dom::bindings::codegen::Bindings::DocumentBinding::{
     DocumentMethods, DocumentReadyState,
 };
-use crate::dom::bindings::codegen::Bindings::EventBinding::EventBinding::EventMethods;
-use crate::dom::bindings::codegen::Bindings::HTMLIFrameElementBinding::HTMLIFrameElementBinding::HTMLIFrameElementMethods;
+use crate::dom::bindings::codegen::Bindings::EventBinding::Event_Binding::EventMethods;
+use crate::dom::bindings::codegen::Bindings::HTMLIFrameElementBinding::HTMLIFrameElement_Binding::HTMLIFrameElementMethods;
 use crate::dom::bindings::codegen::Bindings::HTMLInputElementBinding::HTMLInputElementMethods;
 use crate::dom::bindings::codegen::Bindings::HTMLTextAreaElementBinding::HTMLTextAreaElementMethods;
-use crate::dom::bindings::codegen::Bindings::NavigatorBinding::NavigatorBinding::NavigatorMethods;
+use crate::dom::bindings::codegen::Bindings::NavigatorBinding::Navigator_Binding::NavigatorMethods;
 use crate::dom::bindings::codegen::Bindings::NodeBinding::NodeMethods;
 use crate::dom::bindings::codegen::Bindings::NodeFilterBinding::NodeFilter;
 use crate::dom::bindings::codegen::Bindings::PerformanceBinding::PerformanceMethods;
@@ -48,9 +117,9 @@ use crate::dom::documentfragment::DocumentFragment;
 use crate::dom::documentorshadowroot::{DocumentOrShadowRoot, StyleSheetInDocument};
 use crate::dom::documenttype::DocumentType;
 use crate::dom::domimplementation::DOMImplementation;
-use crate::dom::element::CustomElementCreationMode;
 use crate::dom::element::{
-    Element, ElementCreator, ElementPerformFullscreenEnter, ElementPerformFullscreenExit,
+    CustomElementCreationMode, Element, ElementCreator, ElementPerformFullscreenEnter,
+    ElementPerformFullscreenExit,
 };
 use crate::dom::event::{Event, EventBubbles, EventCancelable, EventDefault, EventStatus};
 use crate::dom::eventtarget::EventTarget;
@@ -78,8 +147,10 @@ use crate::dom::keyboardevent::KeyboardEvent;
 use crate::dom::location::Location;
 use crate::dom::messageevent::MessageEvent;
 use crate::dom::mouseevent::MouseEvent;
-use crate::dom::node::{self, document_from_node, window_from_node, CloneChildrenFlag};
-use crate::dom::node::{Node, NodeDamage, NodeFlags, ShadowIncluding};
+use crate::dom::node::{
+    self, document_from_node, window_from_node, CloneChildrenFlag, Node, NodeDamage, NodeFlags,
+    ShadowIncluding,
+};
 use crate::dom::nodeiterator::NodeIterator;
 use crate::dom::nodelist::NodeList;
 use crate::dom::pagetransitionevent::PageTransitionEvent;
@@ -104,77 +175,12 @@ use crate::dom::window::{ReflowReason, Window};
 use crate::dom::windowproxy::WindowProxy;
 use crate::fetch::FetchCanceller;
 use crate::realms::{AlreadyInRealm, InRealm};
-use crate::script_runtime::JSContext;
-use crate::script_runtime::{CommonScriptMsg, ScriptThreadEventCategory};
+use crate::script_runtime::{CommonScriptMsg, JSContext, ScriptThreadEventCategory};
 use crate::script_thread::{MainThreadScriptMsg, ScriptThread};
 use crate::stylesheet_set::StylesheetSetRef;
 use crate::task::TaskBox;
 use crate::task_source::{TaskSource, TaskSourceName};
 use crate::timers::OneshotTimerCallback;
-use canvas_traits::webgl::{self, WebGLContextId, WebGLMsg};
-use content_security_policy::{self as csp, CspList};
-use cookie::Cookie;
-use devtools_traits::ScriptToDevtoolsControlMsg;
-use dom_struct::dom_struct;
-use embedder_traits::EmbedderMsg;
-use encoding_rs::{Encoding, UTF_8};
-use euclid::default::{Point2D, Rect, Size2D};
-use html5ever::{LocalName, Namespace, QualName};
-use hyper_serde::Serde;
-use ipc_channel::ipc::{self, IpcSender};
-use js::jsapi::JSObject;
-use js::rust::HandleObject;
-use keyboard_types::{Code, Key, KeyState};
-use metrics::{
-    InteractiveFlag, InteractiveMetrics, InteractiveWindow, ProfilerMetadataFactory,
-    ProgressiveWebMetric,
-};
-use mime::{self, Mime};
-use msg::constellation_msg::BrowsingContextId;
-use net_traits::pub_domains::is_pub_domain;
-use net_traits::request::RequestBuilder;
-use net_traits::response::HttpsState;
-use net_traits::CookieSource::NonHTTP;
-use net_traits::CoreResourceMsg::{GetCookiesForUrl, SetCookiesForUrl};
-use net_traits::{FetchResponseMsg, IpcSend, ReferrerPolicy};
-use num_traits::ToPrimitive;
-use percent_encoding::percent_decode;
-use profile_traits::ipc as profile_ipc;
-use profile_traits::time::{TimerMetadata, TimerMetadataFrameType, TimerMetadataReflowType};
-use script_layout_interface::message::{Msg, PendingRestyle, ReflowGoal};
-use script_layout_interface::TrustedNodeAddress;
-use script_traits::{AnimationState, DocumentActivity, MouseButton, MouseEventType};
-use script_traits::{
-    MsDuration, ScriptMsg, TouchEventType, TouchId, UntrustedNodeAddress, WheelDelta,
-};
-use servo_arc::Arc;
-use servo_atoms::Atom;
-use servo_config::pref;
-use servo_media::{ClientContextId, ServoMedia};
-use servo_url::{ImmutableOrigin, MutableOrigin, ServoUrl};
-use std::borrow::Cow;
-use std::cell::Cell;
-use std::cmp::Ordering;
-use std::collections::hash_map::Entry::{Occupied, Vacant};
-use std::collections::{HashMap, HashSet, VecDeque};
-use std::default::Default;
-use std::mem;
-use std::ptr::NonNull;
-use std::rc::Rc;
-use std::slice::from_ref;
-use std::time::{Duration, Instant};
-use style::attr::AttrValue;
-use style::context::QuirksMode;
-use style::invalidation::element::restyle_hints::RestyleHint;
-use style::media_queries::{Device, MediaType};
-use style::selector_parser::Snapshot;
-use style::shared_lock::SharedRwLock as StyleSharedRwLock;
-use style::str::{split_html_space_chars, str_join};
-use style::stylesheet_set::DocumentStylesheetSet;
-use style::stylesheets::{Origin, OriginSet, Stylesheet};
-use url::Host;
-use uuid::Uuid;
-use webrender_api::units::DeviceIntRect;
 
 /// The number of times we are allowed to see spurious `requestAnimationFrame()` calls before
 /// falling back to fake ones.
@@ -218,7 +224,7 @@ pub enum IsHTMLDocument {
 }
 
 #[derive(JSTraceable, MallocSizeOf)]
-#[unrooted_must_root_lint::must_root]
+#[crown::unrooted_must_root_lint::must_root]
 enum FocusTransaction {
     /// No focus operation is in effect.
     NotInTransaction,
@@ -235,21 +241,26 @@ pub struct Document {
     window: Dom<Window>,
     implementation: MutNullableDom<DOMImplementation>,
     #[ignore_malloc_size_of = "type from external crate"]
+    #[no_trace]
     content_type: Mime,
     last_modified: Option<String>,
+    #[no_trace]
     encoding: Cell<&'static Encoding>,
     has_browsing_context: bool,
     is_html_document: bool,
+    #[no_trace]
     activity: Cell<DocumentActivity>,
+    #[no_trace]
     url: DomRefCell<ServoUrl>,
     #[ignore_malloc_size_of = "defined in selectors"]
+    #[no_trace]
     quirks_mode: Cell<QuirksMode>,
     /// Caches for the getElement methods
-    id_map: DomRefCell<HashMap<Atom, Vec<Dom<Element>>>>,
-    name_map: DomRefCell<HashMap<Atom, Vec<Dom<Element>>>>,
-    tag_map: DomRefCell<HashMap<LocalName, Dom<HTMLCollection>>>,
-    tagns_map: DomRefCell<HashMap<QualName, Dom<HTMLCollection>>>,
-    classes_map: DomRefCell<HashMap<Vec<Atom>, Dom<HTMLCollection>>>,
+    id_map: DomRefCell<HashMapTracedValues<Atom, Vec<Dom<Element>>>>,
+    name_map: DomRefCell<HashMapTracedValues<Atom, Vec<Dom<Element>>>>,
+    tag_map: DomRefCell<HashMapTracedValues<LocalName, Dom<HTMLCollection>>>,
+    tagns_map: DomRefCell<HashMapTracedValues<QualName, Dom<HTMLCollection>>>,
+    classes_map: DomRefCell<HashMapTracedValues<Vec<Atom>, Dom<HTMLCollection>>>,
     images: MutNullableDom<HTMLCollection>,
     embeds: MutNullableDom<HTMLCollection>,
     links: MutNullableDom<HTMLCollection>,
@@ -259,8 +270,10 @@ pub struct Document {
     applets: MutNullableDom<HTMLCollection>,
     /// Lock use for style attributes and author-origin stylesheet objects in this document.
     /// Can be acquired once for accessing many objects.
+    #[no_trace]
     style_shared_lock: StyleSharedRwLock,
     /// List of stylesheets associated with nodes in this document. |None| if the list needs to be refreshed.
+    #[custom_trace]
     stylesheets: DomRefCell<DocumentStylesheetSet<StyleSheetInDocument>>,
     stylesheet_list: MutNullableDom<StyleSheetList>,
     ready_state: Cell<DocumentReadyState>,
@@ -309,7 +322,7 @@ pub struct Document {
     appropriate_template_contents_owner_document: MutNullableDom<Document>,
     /// Information on elements needing restyle to ship over to the layout thread when the
     /// time comes.
-    pending_restyles: DomRefCell<HashMap<Dom<Element>, PendingRestyle>>,
+    pending_restyles: DomRefCell<HashMap<Dom<Element>, NoTrace<PendingRestyle>>>,
     /// This flag will be true if layout suppressed a reflow attempt that was
     /// needed in order for the page to be painted.
     needs_paint: Cell<bool>,
@@ -328,10 +341,13 @@ pub struct Document {
     unload_event_start: Cell<u64>,
     unload_event_end: Cell<u64>,
     /// <https://html.spec.whatwg.org/multipage/#concept-document-https-state>
+    #[no_trace]
     https_state: Cell<HttpsState>,
     /// The document's origin.
+    #[no_trace]
     origin: MutableOrigin,
     ///  https://w3c.github.io/webappsec-referrer-policy/#referrer-policy-states
+    #[no_trace]
     referrer_policy: Cell<Option<ReferrerPolicy>>,
     /// <https://html.spec.whatwg.org/multipage/#dom-document-referrer>
     referrer: Option<String>,
@@ -339,6 +355,7 @@ pub struct Document {
     target_element: MutNullableDom<Element>,
     /// <https://w3c.github.io/uievents/#event-type-dblclick>
     #[ignore_malloc_size_of = "Defined in std"]
+    #[no_trace]
     last_click_info: DomRefCell<Option<(Instant, Point2D<f32>)>>,
     /// <https://html.spec.whatwg.org/multipage/#ignore-destructive-writes-counter>
     ignore_destructive_writes_counter: Cell<u32>,
@@ -362,8 +379,10 @@ pub struct Document {
     /// whenever any element with the same ID as the form attribute
     /// is inserted or removed from the document.
     /// See https://html.spec.whatwg.org/multipage/#form-owner
-    form_id_listener_map: DomRefCell<HashMap<Atom, HashSet<Dom<Element>>>>,
+    form_id_listener_map: DomRefCell<HashMapTracedValues<Atom, HashSet<Dom<Element>>>>,
+    #[no_trace]
     interactive_time: DomRefCell<InteractiveMetrics>,
+    #[no_trace]
     tti_window: DomRefCell<InteractiveWindow>,
     /// RAII canceller for Fetch
     canceller: FetchCanceller,
@@ -399,11 +418,13 @@ pub struct Document {
     /// hosting the media controls UI.
     media_controls: DomRefCell<HashMap<String, Dom<ShadowRoot>>>,
     /// List of all WebGL context IDs that need flushing.
-    dirty_webgl_contexts: DomRefCell<HashMap<WebGLContextId, Dom<WebGLRenderingContext>>>,
+    dirty_webgl_contexts:
+        DomRefCell<HashMapTracedValues<WebGLContextId, Dom<WebGLRenderingContext>>>,
     /// List of all WebGPU context IDs that need flushing.
     dirty_webgpu_contexts: DomRefCell<HashMap<WebGPUContextId, Dom<GPUCanvasContext>>>,
     /// https://html.spec.whatwg.org/multipage/#concept-document-csp-list
     #[ignore_malloc_size_of = "Defined in rust-content-security-policy"]
+    #[no_trace]
     csp_list: DomRefCell<Option<CspList>>,
     /// https://w3c.github.io/slection-api/#dfn-selection
     selection: MutNullableDom<Selection>,
@@ -2127,7 +2148,7 @@ impl Document {
         let event = beforeunload_event.upcast::<Event>();
         event.set_trusted(true);
         let event_target = self.window.upcast::<EventTarget>();
-        let has_listeners = event.has_listeners_for(&event_target, &atom!("beforeunload"));
+        let has_listeners = event_target.has_listeners_for(&atom!("beforeunload"));
         self.window.dispatch_event_with_target_override(&event);
         // TODO: Step 6, decrease the event loop's termination nesting level by 1.
         // Step 7
@@ -2197,7 +2218,7 @@ impl Document {
             );
             event.set_trusted(true);
             let event_target = self.window.upcast::<EventTarget>();
-            let has_listeners = event.has_listeners_for(&event_target, &atom!("unload"));
+            let has_listeners = event_target.has_listeners_for(&atom!("unload"));
             let _ = self.window.dispatch_event_with_target_override(&event);
             self.fired_unload.set(true);
             // Step 9
@@ -2857,7 +2878,7 @@ impl Document {
             .or_insert_with(|| Dom::from_ref(context));
     }
 
-    #[allow(unrooted_must_root)]
+    #[allow(crown::unrooted_must_root)]
     pub fn flush_dirty_webgpu_canvases(&self) {
         self.dirty_webgpu_contexts
             .borrow_mut()
@@ -2865,11 +2886,11 @@ impl Document {
             .for_each(|(_, context)| context.send_swap_chain_present());
     }
 
-    pub fn id_map(&self) -> Ref<HashMap<Atom, Vec<Dom<Element>>>> {
+    pub fn id_map(&self) -> Ref<HashMapTracedValues<Atom, Vec<Dom<Element>>>> {
         self.id_map.borrow()
     }
 
-    pub fn name_map(&self) -> Ref<HashMap<Atom, Vec<Dom<Element>>>> {
+    pub fn name_map(&self) -> Ref<HashMapTracedValues<Atom, Vec<Dom<Element>>>> {
         self.name_map.borrow()
     }
 }
@@ -3071,15 +3092,15 @@ impl Document {
             url: DomRefCell::new(url),
             // https://dom.spec.whatwg.org/#concept-document-quirks
             quirks_mode: Cell::new(QuirksMode::NoQuirks),
-            id_map: DomRefCell::new(HashMap::new()),
-            name_map: DomRefCell::new(HashMap::new()),
+            id_map: DomRefCell::new(HashMapTracedValues::new()),
+            name_map: DomRefCell::new(HashMapTracedValues::new()),
             // https://dom.spec.whatwg.org/#concept-document-encoding
             encoding: Cell::new(encoding),
             is_html_document: is_html_document == IsHTMLDocument::HTMLDocument,
             activity: Cell::new(activity),
-            tag_map: DomRefCell::new(HashMap::new()),
-            tagns_map: DomRefCell::new(HashMap::new()),
-            classes_map: DomRefCell::new(HashMap::new()),
+            tag_map: DomRefCell::new(HashMapTracedValues::new()),
+            tagns_map: DomRefCell::new(HashMapTracedValues::new()),
+            classes_map: DomRefCell::new(HashMapTracedValues::new()),
             images: Default::default(),
             embeds: Default::default(),
             links: Default::default(),
@@ -3164,7 +3185,7 @@ impl Document {
             shadow_roots: DomRefCell::new(HashSet::new()),
             shadow_roots_styles_changed: Cell::new(false),
             media_controls: DomRefCell::new(HashMap::new()),
-            dirty_webgl_contexts: DomRefCell::new(HashMap::new()),
+            dirty_webgl_contexts: DomRefCell::new(HashMapTracedValues::new()),
             dirty_webgpu_contexts: DomRefCell::new(HashMap::new()),
             csp_list: DomRefCell::new(None),
             selection: MutNullableDom::new(None),
@@ -3494,8 +3515,10 @@ impl Document {
     pub fn ensure_pending_restyle(&self, el: &Element) -> RefMut<PendingRestyle> {
         let map = self.pending_restyles.borrow_mut();
         RefMut::map(map, |m| {
-            m.entry(Dom::from_ref(el))
-                .or_insert_with(PendingRestyle::new)
+            &mut m
+                .entry(Dom::from_ref(el))
+                .or_insert_with(|| NoTrace(PendingRestyle::new()))
+                .0
         })
     }
 
@@ -3794,7 +3817,7 @@ impl Document {
 
     /// Add a stylesheet owned by `owner` to the list of document sheets, in the
     /// correct tree position.
-    #[allow(unrooted_must_root)] // Owner needs to be rooted already necessarily.
+    #[allow(crown::unrooted_must_root)] // Owner needs to be rooted already necessarily.
     pub fn add_stylesheet(&self, owner: &Element, sheet: Arc<Stylesheet>) {
         let stylesheets = &mut *self.stylesheets.borrow_mut();
         let insertion_point = stylesheets
@@ -3827,7 +3850,7 @@ impl Document {
     }
 
     /// Remove a stylesheet owned by `owner` from the list of document sheets.
-    #[allow(unrooted_must_root)] // Owner needs to be rooted already necessarily.
+    #[allow(crown::unrooted_must_root)] // Owner needs to be rooted already necessarily.
     pub fn remove_stylesheet(&self, owner: &Element, s: &Arc<Stylesheet>) {
         match self.window.layout_chan() {
             Some(chan) => chan.send(Msg::RemoveStylesheet(s.clone())).unwrap(),
@@ -3853,7 +3876,7 @@ impl Document {
         })
     }
 
-    #[allow(unrooted_must_root)]
+    #[allow(crown::unrooted_must_root)]
     pub fn drain_pending_restyles(&self) -> Vec<(TrustedNodeAddress, PendingRestyle)> {
         self.pending_restyles
             .borrow_mut()
@@ -3864,7 +3887,7 @@ impl Document {
                     return None;
                 }
                 node.note_dirty_descendants();
-                Some((node.to_trusted_node_address(), restyle))
+                Some((node.to_trusted_node_address(), restyle.0))
             })
             .collect()
     }
@@ -3926,13 +3949,21 @@ impl Element {
     fn click_event_filter_by_disabled_state(&self) -> bool {
         let node = self.upcast::<Node>();
         match node.type_id() {
-            NodeTypeId::Element(ElementTypeId::HTMLElement(HTMLElementTypeId::HTMLButtonElement)) |
-            NodeTypeId::Element(ElementTypeId::HTMLElement(HTMLElementTypeId::HTMLInputElement)) |
-            // NodeTypeId::Element(ElementTypeId::HTMLKeygenElement) |
-            NodeTypeId::Element(ElementTypeId::HTMLElement(HTMLElementTypeId::HTMLOptionElement)) |
-            NodeTypeId::Element(ElementTypeId::HTMLElement(HTMLElementTypeId::HTMLSelectElement)) |
-            NodeTypeId::Element(ElementTypeId::HTMLElement(HTMLElementTypeId::HTMLTextAreaElement))
-                if self.disabled_state() => true,
+            NodeTypeId::Element(ElementTypeId::HTMLElement(
+                HTMLElementTypeId::HTMLButtonElement,
+            )) |
+            NodeTypeId::Element(ElementTypeId::HTMLElement(
+                HTMLElementTypeId::HTMLInputElement,
+            )) |
+            NodeTypeId::Element(ElementTypeId::HTMLElement(
+                HTMLElementTypeId::HTMLOptionElement,
+            )) |
+            NodeTypeId::Element(ElementTypeId::HTMLElement(
+                HTMLElementTypeId::HTMLSelectElement,
+            )) |
+            NodeTypeId::Element(ElementTypeId::HTMLElement(
+                HTMLElementTypeId::HTMLTextAreaElement,
+            )) if self.disabled_state() => true,
             _ => false,
         }
     }
@@ -4838,6 +4869,7 @@ impl DocumentMethods for Document {
         // Step 4.
         #[derive(JSTraceable, MallocSizeOf)]
         struct DocumentNamedGetter {
+            #[no_trace]
             name: Atom,
         }
         impl CollectionFilter for DocumentNamedGetter {
@@ -4878,7 +4910,7 @@ impl DocumentMethods for Document {
         let mut names_with_first_named_element_map: HashMap<&Atom, &Element> = HashMap::new();
 
         let name_map = self.name_map.borrow();
-        for (name, elements) in &*name_map {
+        for (name, elements) in &(*name_map).0 {
             if name.is_empty() {
                 continue;
             }
@@ -4890,7 +4922,7 @@ impl DocumentMethods for Document {
             }
         }
         let id_map = self.id_map.borrow();
-        for (id, elements) in &*id_map {
+        for (id, elements) in &(*id_map).0 {
             if id.is_empty() {
                 continue;
             }
@@ -5326,7 +5358,7 @@ impl AnimationFrameCallback {
 }
 
 #[derive(Default, JSTraceable, MallocSizeOf)]
-#[unrooted_must_root_lint::must_root]
+#[crown::unrooted_must_root_lint::must_root]
 struct PendingInOrderScriptVec {
     scripts: DomRefCell<VecDeque<PendingScript>>,
 }
@@ -5364,9 +5396,10 @@ impl PendingInOrderScriptVec {
 }
 
 #[derive(JSTraceable, MallocSizeOf)]
-#[unrooted_must_root_lint::must_root]
+#[crown::unrooted_must_root_lint::must_root]
 struct PendingScript {
     element: Dom<HTMLScriptElement>,
+    // TODO(sagudev): could this be all no_trace?
     load: Option<ScriptResult>,
 }
 

@@ -7,23 +7,68 @@
 
 #![allow(dead_code)]
 
+use core::ffi::c_char;
+use std::cell::Cell;
+use std::ffi::CString;
+use std::io::{stdout, Write};
+use std::ops::Deref;
+use std::os::raw::c_void;
+use std::rc::Rc;
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+use std::{fmt, os, ptr, thread};
+
+use js::glue::{
+    CollectServoSizes, CreateJobQueue, DeleteJobQueue, DispatchableRun, JobQueueTraps,
+    RUST_js_GetErrorMessage, SetBuildId, StreamConsumerConsumeChunk,
+    StreamConsumerNoteResponseURLs, StreamConsumerStreamEnd, StreamConsumerStreamError,
+};
+use js::jsapi::{
+    BuildIdCharVector, ContextOptionsRef, DisableIncrementalGC, Dispatchable as JSRunnable,
+    Dispatchable_MaybeShuttingDown, GCDescription, GCOptions, GCProgress, GCReason,
+    GetPromiseUserInputEventHandlingState, HandleObject, Heap, InitConsumeStreamCallback,
+    InitDispatchToEventLoop, JSContext as RawJSContext, JSGCParamKey, JSGCStatus,
+    JSJitCompilerOption, JSObject, JSSecurityCallbacks, JSTracer, JS_AddExtraGCRootsTracer,
+    JS_InitDestroyPrincipalsCallback, JS_RequestInterruptCallback, JS_SetGCCallback,
+    JS_SetGCParameter, JS_SetGlobalJitCompilerOption, JS_SetOffthreadIonCompilationEnabled,
+    JS_SetParallelParsingEnabled, JS_SetSecurityCallbacks, JobQueue, MimeType,
+    PromiseRejectionHandlingState, PromiseUserInputEventHandlingState, SetDOMCallbacks,
+    SetGCSliceCallback, SetJobQueue, SetPreserveWrapperCallbacks, SetProcessBuildIdOp,
+    SetPromiseRejectionTrackerCallback, StreamConsumer as JSStreamConsumer,
+};
+use js::jsval::UndefinedValue;
+use js::panic::wrap_panic;
+use js::rust::wrappers::{GetPromiseIsHandled, JS_GetPromiseResult};
+use js::rust::{
+    Handle, HandleObject as RustHandleObject, IntoHandle, JSEngine, JSEngineHandle, ParentRuntime,
+    Runtime as RustRuntime,
+};
+use lazy_static::lazy_static;
+use malloc_size_of::MallocSizeOfOps;
+use msg::constellation_msg::PipelineId;
+use profile_traits::mem::{Report, ReportKind, ReportsChan};
+use profile_traits::path;
+use servo_config::{opts, pref};
+use style::thread_state::{self, ThreadState};
+use time::{now, Tm};
+
 use crate::body::BodyMixin;
 use crate::dom::bindings::codegen::Bindings::PromiseBinding::PromiseJobCallback;
-use crate::dom::bindings::codegen::Bindings::ResponseBinding::ResponseBinding::ResponseMethods;
 use crate::dom::bindings::codegen::Bindings::ResponseBinding::ResponseType as DOMResponseType;
-use crate::dom::bindings::conversions::get_dom_class;
-use crate::dom::bindings::conversions::private_from_object;
-use crate::dom::bindings::conversions::root_from_handleobject;
+use crate::dom::bindings::codegen::Bindings::ResponseBinding::Response_Binding::ResponseMethods;
+use crate::dom::bindings::conversions::{
+    get_dom_class, private_from_object, root_from_handleobject,
+};
 use crate::dom::bindings::error::{throw_dom_exception, Error};
 use crate::dom::bindings::inheritance::Castable;
-use crate::dom::bindings::principals;
-use crate::dom::bindings::refcounted::{trace_refcounted_objects, LiveDOMReferences};
-use crate::dom::bindings::refcounted::{Trusted, TrustedPromise};
+use crate::dom::bindings::refcounted::{
+    trace_refcounted_objects, LiveDOMReferences, Trusted, TrustedPromise,
+};
 use crate::dom::bindings::reflector::DomObject;
 use crate::dom::bindings::root::trace_roots;
-use crate::dom::bindings::settings_stack;
-use crate::dom::bindings::trace::{trace_traceables, JSTraceable};
+use crate::dom::bindings::trace::JSTraceable;
 use crate::dom::bindings::utils::DOM_CALLBACKS;
+use crate::dom::bindings::{principals, settings_stack};
 use crate::dom::event::{Event, EventBubbles, EventCancelable, EventStatus};
 use crate::dom::eventtarget::EventTarget;
 use crate::dom::globalscope::GlobalScope;
@@ -37,61 +82,6 @@ use crate::script_thread::trace_thread;
 use crate::task::TaskBox;
 use crate::task_source::networking::NetworkingTaskSource;
 use crate::task_source::{TaskSource, TaskSourceName};
-use js::glue::{CollectServoSizes, CreateJobQueue, DeleteJobQueue, DispatchableRun};
-use js::glue::{JobQueueTraps, RUST_js_GetErrorMessage, SetBuildId, StreamConsumerConsumeChunk};
-use js::glue::{
-    StreamConsumerNoteResponseURLs, StreamConsumerStreamEnd, StreamConsumerStreamError,
-};
-use js::jsapi::ContextOptionsRef;
-use js::jsapi::GetPromiseUserInputEventHandlingState;
-use js::jsapi::InitConsumeStreamCallback;
-use js::jsapi::InitDispatchToEventLoop;
-use js::jsapi::MimeType;
-use js::jsapi::PromiseUserInputEventHandlingState;
-use js::jsapi::StreamConsumer as JSStreamConsumer;
-use js::jsapi::{BuildIdCharVector, DisableIncrementalGC, GCDescription, GCProgress};
-use js::jsapi::{Dispatchable as JSRunnable, Dispatchable_MaybeShuttingDown};
-use js::jsapi::{
-    GCOptions, GCReason, JSGCStatus, JS_AddExtraGCRootsTracer, JS_RequestInterruptCallback,
-    JS_SetGCCallback,
-};
-use js::jsapi::{HandleObject, Heap, JobQueue};
-use js::jsapi::{JSContext as RawJSContext, JSTracer, SetDOMCallbacks, SetGCSliceCallback};
-use js::jsapi::{JSGCParamKey, JS_SetGCParameter, JS_SetGlobalJitCompilerOption};
-use js::jsapi::{
-    JSJitCompilerOption, JS_SetOffthreadIonCompilationEnabled, JS_SetParallelParsingEnabled,
-};
-use js::jsapi::{JSObject, PromiseRejectionHandlingState, SetPreserveWrapperCallbacks};
-use js::jsapi::{JSSecurityCallbacks, JS_InitDestroyPrincipalsCallback, JS_SetSecurityCallbacks};
-use js::jsapi::{SetJobQueue, SetProcessBuildIdOp, SetPromiseRejectionTrackerCallback};
-use js::jsval::UndefinedValue;
-use js::panic::wrap_panic;
-use js::rust::wrappers::{GetPromiseIsHandled, JS_GetPromiseResult};
-use js::rust::Handle;
-use js::rust::HandleObject as RustHandleObject;
-use js::rust::IntoHandle;
-use js::rust::ParentRuntime;
-use js::rust::Runtime as RustRuntime;
-use js::rust::{JSEngine, JSEngineHandle};
-use malloc_size_of::MallocSizeOfOps;
-use msg::constellation_msg::PipelineId;
-use profile_traits::mem::{Report, ReportKind, ReportsChan};
-use servo_config::opts;
-use servo_config::pref;
-use std::cell::Cell;
-use std::ffi::CString;
-use std::fmt;
-use std::io::{stdout, Write};
-use std::ops::Deref;
-use std::os;
-use std::os::raw::c_void;
-use std::ptr;
-use std::rc::Rc;
-use std::sync::Mutex;
-use std::thread;
-use std::time::Duration;
-use style::thread_state::{self, ThreadState};
-use time::{now, Tm};
 
 static JOB_QUEUE_TRAPS: JobQueueTraps = JobQueueTraps {
     getIncumbentGlobal: Some(get_incumbent_global),
@@ -243,7 +233,7 @@ unsafe extern "C" fn enqueue_promise_job(
     result
 }
 
-#[allow(unsafe_code, unrooted_must_root)]
+#[allow(unsafe_code, crown::unrooted_must_root)]
 /// https://html.spec.whatwg.org/multipage/#the-hostpromiserejectiontracker-implementation
 unsafe extern "C" fn promise_rejection_tracker(
     cx: *mut RawJSContext,
@@ -321,7 +311,7 @@ unsafe extern "C" fn promise_rejection_tracker(
     })
 }
 
-#[allow(unsafe_code, unrooted_must_root)]
+#[allow(unsafe_code, crown::unrooted_must_root)]
 /// https://html.spec.whatwg.org/multipage/#notify-about-rejected-promises
 pub fn notify_about_rejected_promises(global: &GlobalScope) {
     let cx = GlobalScope::get_cx();
@@ -825,7 +815,6 @@ unsafe extern "C" fn trace_rust_roots(tr: *mut JSTracer, _data: *mut os::raw::c_
     }
     debug!("starting custom root handler");
     trace_thread(tr);
-    trace_traceables(tr);
     trace_roots(tr);
     trace_refcounted_objects(tr);
     settings_stack::trace(tr);
@@ -835,7 +824,7 @@ unsafe extern "C" fn trace_rust_roots(tr: *mut JSTracer, _data: *mut os::raw::c_
 #[allow(unsafe_code)]
 unsafe extern "C" fn servo_build_id(build_id: *mut BuildIdCharVector) -> bool {
     let servo_id = b"Servo\0";
-    SetBuildId(build_id, &servo_id[0], servo_id.len())
+    SetBuildId(build_id, servo_id[0] as *const c_char, servo_id.len())
 }
 
 #[allow(unsafe_code)]
@@ -858,24 +847,34 @@ unsafe fn set_gc_zeal_options(cx: *mut RawJSContext) {
 #[cfg(not(feature = "debugmozjs"))]
 unsafe fn set_gc_zeal_options(_: *mut RawJSContext) {}
 
-#[repr(transparent)]
 /// A wrapper around a JSContext that is Send,
 /// enabling an interrupt to be requested
 /// from a thread other than the one running JS using that context.
-pub struct ContextForRequestInterrupt(*mut RawJSContext);
+#[derive(Clone)]
+pub struct ContextForRequestInterrupt(Arc<Mutex<Option<*mut RawJSContext>>>);
 
 impl ContextForRequestInterrupt {
     pub fn new(context: *mut RawJSContext) -> ContextForRequestInterrupt {
-        ContextForRequestInterrupt(context)
+        ContextForRequestInterrupt(Arc::new(Mutex::new(Some(context))))
+    }
+
+    pub fn revoke(&self) {
+        self.0.lock().unwrap().take();
     }
 
     #[allow(unsafe_code)]
     /// Can be called from any thread, to request the callback set by
-    /// JS_AddInterruptCallback to be called
-    /// on the thread where that context is running.
+    /// JS_AddInterruptCallback to be called on the thread
+    /// where that context is running.
+    /// The lock is held when calling JS_RequestInterruptCallback
+    /// because it is possible for the JSContext to be destroyed
+    /// on the other thread in the case of Worker shutdown
     pub fn request_interrupt(&self) {
-        unsafe {
-            JS_RequestInterruptCallback(self.0);
+        let maybe_cx = self.0.lock().unwrap();
+        if let Some(cx) = *maybe_cx {
+            unsafe {
+                JS_RequestInterruptCallback(cx);
+            }
         }
     }
 }

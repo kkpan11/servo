@@ -2,6 +2,26 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
+use std::cell::Cell;
+use std::collections::hash_map::Entry;
+use std::collections::{HashMap, VecDeque};
+use std::mem;
+use std::rc::Rc;
+use std::sync::{Arc, Mutex};
+
+use dom_struct::dom_struct;
+use js::rust::CustomAutoRooterGuard;
+use js::typedarray::ArrayBuffer;
+use msg::constellation_msg::PipelineId;
+use servo_media::audio::context::{
+    AudioContext, AudioContextOptions, OfflineAudioContextOptions, ProcessingState,
+    RealTimeAudioContextOptions,
+};
+use servo_media::audio::decoder::AudioDecoderCallbacks;
+use servo_media::audio::graph::NodeId;
+use servo_media::{ClientContextId, ServoMedia};
+use uuid::Uuid;
+
 use crate::dom::analysernode::AnalyserNode;
 use crate::dom::audiobuffer::AudioBuffer;
 use crate::dom::audiobuffersourcenode::AudioBufferSourceNode;
@@ -12,14 +32,12 @@ use crate::dom::bindings::callback::ExceptionHandling;
 use crate::dom::bindings::cell::DomRefCell;
 use crate::dom::bindings::codegen::Bindings::AnalyserNodeBinding::AnalyserOptions;
 use crate::dom::bindings::codegen::Bindings::AudioBufferSourceNodeBinding::AudioBufferSourceOptions;
-use crate::dom::bindings::codegen::Bindings::AudioNodeBinding::AudioNodeOptions;
 use crate::dom::bindings::codegen::Bindings::AudioNodeBinding::{
-    ChannelCountMode, ChannelInterpretation,
+    AudioNodeOptions, ChannelCountMode, ChannelInterpretation,
 };
-use crate::dom::bindings::codegen::Bindings::BaseAudioContextBinding::AudioContextState;
-use crate::dom::bindings::codegen::Bindings::BaseAudioContextBinding::BaseAudioContextMethods;
-use crate::dom::bindings::codegen::Bindings::BaseAudioContextBinding::DecodeErrorCallback;
-use crate::dom::bindings::codegen::Bindings::BaseAudioContextBinding::DecodeSuccessCallback;
+use crate::dom::bindings::codegen::Bindings::BaseAudioContextBinding::{
+    AudioContextState, BaseAudioContextMethods, DecodeErrorCallback, DecodeSuccessCallback,
+};
 use crate::dom::bindings::codegen::Bindings::BiquadFilterNodeBinding::BiquadFilterOptions;
 use crate::dom::bindings::codegen::Bindings::ChannelMergerNodeBinding::ChannelMergerOptions;
 use crate::dom::bindings::codegen::Bindings::ChannelSplitterNodeBinding::ChannelSplitterOptions;
@@ -48,22 +66,6 @@ use crate::dom::stereopannernode::StereoPannerNode;
 use crate::dom::window::Window;
 use crate::realms::InRealm;
 use crate::task_source::TaskSource;
-use dom_struct::dom_struct;
-use js::rust::CustomAutoRooterGuard;
-use js::typedarray::ArrayBuffer;
-use msg::constellation_msg::PipelineId;
-use servo_media::audio::context::{AudioContext, AudioContextOptions, ProcessingState};
-use servo_media::audio::context::{OfflineAudioContextOptions, RealTimeAudioContextOptions};
-use servo_media::audio::decoder::AudioDecoderCallbacks;
-use servo_media::audio::graph::NodeId;
-use servo_media::{ClientContextId, ServoMedia};
-use std::cell::Cell;
-use std::collections::hash_map::Entry;
-use std::collections::{HashMap, VecDeque};
-use std::mem;
-use std::rc::Rc;
-use std::sync::{Arc, Mutex};
-use uuid::Uuid;
 
 #[allow(dead_code)]
 pub enum BaseAudioContextOptions {
@@ -82,6 +84,7 @@ struct DecodeResolver {
 pub struct BaseAudioContext {
     eventtarget: EventTarget,
     #[ignore_malloc_size_of = "servo_media"]
+    #[no_trace]
     audio_context_impl: Arc<Mutex<AudioContext>>,
     /// https://webaudio.github.io/web-audio-api/#dom-baseaudiocontext-destination
     destination: MutNullableDom<AudioDestinationNode>,
@@ -106,7 +109,7 @@ pub struct BaseAudioContext {
 }
 
 impl BaseAudioContext {
-    #[allow(unrooted_must_root)]
+    #[allow(crown::unrooted_must_root)]
     pub fn new_inherited(
         options: BaseAudioContextOptions,
         pipeline_id: PipelineId,
@@ -190,9 +193,9 @@ impl BaseAudioContext {
     /// does not take a list of promises to fulfill. Callers cannot just pop
     /// the front list off of `in_flight_resume_promises_queue` and later fulfill
     /// the promises because that would mean putting
-    /// `#[allow(unrooted_must_root)]` on even more functions, potentially
+    /// `#[allow(crown::unrooted_must_root)]` on even more functions, potentially
     /// hiding actual safety bugs.
-    #[allow(unrooted_must_root)]
+    #[allow(crown::unrooted_must_root)]
     fn fulfill_in_flight_resume_promises<F>(&self, f: F)
     where
         F: FnOnce(),

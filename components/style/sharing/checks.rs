@@ -7,7 +7,7 @@
 //! elements can indeed share the same style.
 
 use crate::bloom::StyleBloom;
-use crate::context::{SelectorFlagsMap, SharedStyleContext};
+use crate::context::SharedStyleContext;
 use crate::dom::TElement;
 use crate::sharing::{StyleSharingCandidate, StyleSharingTarget};
 use selectors::NthIndexCache;
@@ -36,6 +36,15 @@ where
 
     // Cousins are a bit more complicated.
     //
+    // The fact that the candidate is here means that its element does not anchor
+    // the relative selector. However, it may have considered relative selector(s)
+    // to compute its style, i.e. there's a rule `<..> :has(<..>) <..> candidate`.
+    // In this case, evaluating style sharing requires evaluating the relative
+    // selector for the target anyway.
+    if candidate.considered_relative_selector {
+        return false;
+    }
+
     // If a parent element was already styled and we traversed past it without
     // restyling it, that may be because our clever invalidation logic was able
     // to prove that the styles of that element would remain unchanged despite
@@ -120,15 +129,13 @@ pub fn revalidate<E>(
     shared_context: &SharedStyleContext,
     bloom: &StyleBloom<E>,
     nth_index_cache: &mut NthIndexCache,
-    selector_flags_map: &mut SelectorFlagsMap<E>,
 ) -> bool
 where
     E: TElement,
 {
     let stylist = &shared_context.stylist;
 
-    let for_element =
-        target.revalidation_match_results(stylist, bloom, nth_index_cache, selector_flags_map);
+    let for_element = target.revalidation_match_results(stylist, bloom, nth_index_cache);
 
     let for_candidate = candidate.revalidation_match_results(stylist, bloom, nth_index_cache);
 

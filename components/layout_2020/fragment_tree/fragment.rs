@@ -2,23 +2,25 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
-use super::{BaseFragment, BoxFragment, ContainingBlockManager, HoistedSharedFragment, Tag};
-use crate::cell::ArcRefCell;
-use crate::geom::flow_relative::{Rect, Sides};
-use crate::geom::PhysicalRect;
-use crate::style_ext::ComputedValuesExt;
+use std::sync::Arc;
+
 use gfx::font::FontMetrics as GfxFontMetrics;
 use gfx::text::glyph::GlyphStore;
 use gfx_traits::print_tree::PrintTree;
 use msg::constellation_msg::{BrowsingContextId, PipelineId};
+use serde::Serialize;
 use servo_arc::Arc as ServoArc;
-use std::sync::Arc;
 use style::logical_geometry::WritingMode;
 use style::properties::ComputedValues;
 use style::values::computed::Length;
 use style::values::specified::text::TextDecorationLine;
 use style::Zero;
 use webrender_api::{FontInstanceKey, ImageKey};
+
+use super::{BaseFragment, BoxFragment, ContainingBlockManager, HoistedSharedFragment, Tag};
+use crate::cell::ArcRefCell;
+use crate::geom::{LogicalRect, LogicalSides, PhysicalRect};
+use crate::style_ext::ComputedValuesExt;
 
 #[derive(Serialize)]
 pub(crate) enum Fragment {
@@ -65,7 +67,7 @@ pub(crate) struct CollapsedMargin {
 #[derive(Serialize)]
 pub(crate) struct AnonymousFragment {
     pub base: BaseFragment,
-    pub rect: Rect<Length>,
+    pub rect: LogicalRect<Length>,
     pub children: Vec<ArcRefCell<Fragment>>,
     pub mode: WritingMode,
 
@@ -101,7 +103,7 @@ pub(crate) struct TextFragment {
     pub base: BaseFragment,
     #[serde(skip_serializing)]
     pub parent_style: ServoArc<ComputedValues>,
-    pub rect: Rect<Length>,
+    pub rect: LogicalRect<Length>,
     pub font_metrics: FontMetrics,
     #[serde(skip_serializing)]
     pub font_key: FontInstanceKey,
@@ -115,7 +117,7 @@ pub(crate) struct ImageFragment {
     pub base: BaseFragment,
     #[serde(skip_serializing)]
     pub style: ServoArc<ComputedValues>,
-    pub rect: Rect<Length>,
+    pub rect: LogicalRect<Length>,
     #[serde(skip_serializing)]
     pub image_key: ImageKey,
 }
@@ -125,25 +127,12 @@ pub(crate) struct IFrameFragment {
     pub base: BaseFragment,
     pub pipeline_id: PipelineId,
     pub browsing_context_id: BrowsingContextId,
-    pub rect: Rect<Length>,
+    pub rect: LogicalRect<Length>,
     #[serde(skip_serializing)]
     pub style: ServoArc<ComputedValues>,
 }
 
 impl Fragment {
-    pub fn offset_inline(&mut self, offset: &Length) {
-        let position = match self {
-            Fragment::Box(f) => &mut f.content_rect.start_corner,
-            Fragment::Float(_) | Fragment::AbsoluteOrFixedPositioned(_) => return,
-            Fragment::Anonymous(f) => &mut f.rect.start_corner,
-            Fragment::Text(f) => &mut f.rect.start_corner,
-            Fragment::Image(f) => &mut f.rect.start_corner,
-            Fragment::IFrame(f) => &mut f.rect.start_corner,
-        };
-
-        position.inline += *offset;
-    }
-
     pub fn base(&self) -> Option<&BaseFragment> {
         Some(match self {
             Fragment::Box(fragment) => &fragment.base,
@@ -175,6 +164,15 @@ impl Fragment {
             Fragment::Text(fragment) => fragment.print(tree),
             Fragment::Image(fragment) => fragment.print(tree),
             Fragment::IFrame(fragment) => fragment.print(tree),
+        }
+    }
+
+    pub fn scrolling_area(&self, containing_block: &PhysicalRect<Length>) -> PhysicalRect<Length> {
+        match self {
+            Fragment::Box(fragment) | Fragment::Float(fragment) => fragment
+                .scrollable_overflow(containing_block)
+                .translate(containing_block.origin.to_vector()),
+            _ => self.scrollable_overflow(containing_block),
         }
     }
 
@@ -257,7 +255,7 @@ impl Fragment {
 }
 
 impl AnonymousFragment {
-    pub fn new(rect: Rect<Length>, children: Vec<Fragment>, mode: WritingMode) -> Self {
+    pub fn new(rect: LogicalRect<Length>, children: Vec<Fragment>, mode: WritingMode) -> Self {
         // FIXME(mrobinson, bug 25564): We should be using the containing block
         // here to properly convert scrollable overflow to physical geometry.
         let containing_block = PhysicalRect::zero();
@@ -299,11 +297,12 @@ impl AnonymousFragment {
 impl TextFragment {
     pub fn print(&self, tree: &mut PrintTree) {
         tree.add_item(format!(
-            "Text num_glyphs={}",
+            "Text num_glyphs={} box={:?}",
             self.glyphs
                 .iter()
                 .map(|glyph_store| glyph_store.len().0)
-                .sum::<isize>()
+                .sum::<isize>(),
+            self.rect,
         ));
     }
 }
@@ -329,7 +328,7 @@ impl IFrameFragment {
 }
 
 impl CollapsedBlockMargins {
-    pub fn from_margin(margin: &Sides<Length>) -> Self {
+    pub fn from_margin(margin: &LogicalSides<Length>) -> Self {
         Self {
             collapsed_through: false,
             start: CollapsedMargin::new(margin.block_start),

@@ -4,10 +4,11 @@
 
 //! A module for writing time profiler traces out to a self contained HTML file.
 
-use profile_traits::time::{ProfilerCategory, TimerMetadata};
-use std::fs;
 use std::io::{self, Write};
-use std::path;
+use std::{fs, path};
+
+use profile_traits::time::{ProfilerCategory, TimerMetadata};
+use serde::Serialize;
 
 /// An RAII class for writing the HTML trace dump.
 #[derive(Debug)]

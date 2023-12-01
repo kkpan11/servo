@@ -2,47 +2,55 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
-use crate::data_loader::decode;
-use crate::fetch::cors_cache::CorsCache;
-use crate::fetch::headers::determine_nosniff;
-use crate::filemanager_thread::{FileManager, FILE_CHUNK_SIZE};
-use crate::http_loader::{determine_requests_referrer, http_fetch, HttpState};
-use crate::http_loader::{set_default_accept, set_default_accept_language};
-use crate::subresource_integrity::is_response_integrity_valid;
+use std::borrow::Cow;
+use std::fs::File;
+use std::io::{self, BufReader, Seek, SeekFrom};
+use std::ops::Bound;
+use std::sync::atomic::Ordering;
+use std::sync::{Arc, Mutex};
+use std::{mem, str};
+
+use base64::engine::general_purpose;
+use base64::Engine as _;
 use content_security_policy as csp;
 use crossbeam_channel::Sender;
 use devtools_traits::DevtoolsControlMsg;
 use headers::{AccessControlExposeHeaders, ContentType, HeaderMapExt, Range};
 use http::header::{self, HeaderMap, HeaderName};
-use http::Method;
-use http::StatusCode;
+use http::{Method, StatusCode};
 use ipc_channel::ipc::{self, IpcReceiver};
+use lazy_static::lazy_static;
+use log::{debug, warn};
 use mime::{self, Mime};
 use net_traits::blob_url_store::{parse_blob_url, BlobURLStoreError};
 use net_traits::filemanager_thread::{FileTokenCheck, RelativePos};
 use net_traits::request::{
-    is_cors_safelisted_method, is_cors_safelisted_request_header, Origin, ResponseTainting, Window,
-};
-use net_traits::request::{
-    BodyChunkRequest, BodyChunkResponse, CredentialsMode, Destination, Referrer, Request,
-    RequestMode,
+    is_cors_safelisted_method, is_cors_safelisted_request_header, BodyChunkRequest,
+    BodyChunkResponse, CredentialsMode, Destination, Origin, Referrer, Request, RequestMode,
+    ResponseTainting, Window,
 };
 use net_traits::response::{Response, ResponseBody, ResponseType};
-use net_traits::{FetchTaskTarget, NetworkError, ReferrerPolicy, ResourceFetchTiming};
-use net_traits::{ResourceAttribute, ResourceTimeValue, ResourceTimingType};
+use net_traits::{
+    FetchTaskTarget, NetworkError, ReferrerPolicy, ResourceAttribute, ResourceFetchTiming,
+    ResourceTimeValue, ResourceTimingType,
+};
+use rustls::Certificate;
+use serde::{Deserialize, Serialize};
 use servo_arc::Arc as ServoArc;
 use servo_url::ServoUrl;
-use std::borrow::Cow;
-use std::fs::File;
-use std::io::{BufReader, Seek, SeekFrom};
-use std::mem;
-use std::ops::Bound;
-use std::str;
-use std::sync::atomic::Ordering;
-use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc::{
     unbounded_channel, UnboundedReceiver as TokioReceiver, UnboundedSender as TokioSender,
 };
+
+use crate::data_loader::decode;
+use crate::fetch::cors_cache::CorsCache;
+use crate::fetch::headers::determine_nosniff;
+use crate::filemanager_thread::{FileManager, FILE_CHUNK_SIZE};
+use crate::http_loader::{
+    determine_requests_referrer, http_fetch, set_default_accept, set_default_accept_language,
+    HttpState,
+};
+use crate::subresource_integrity::is_response_integrity_valid;
 
 lazy_static! {
     static ref X_CONTENT_TYPE_OPTIONS: HeaderName =
@@ -192,6 +200,13 @@ pub async fn main_fetch(
 ) -> Response {
     // Step 1.
     let mut response = None;
+
+    // Servo internal: return a crash error when a crash error page is needed
+    if let Some(ref details) = request.crash {
+        response = Some(Response::network_error(NetworkError::Crash(
+            details.clone(),
+        )));
+    }
 
     // Step 2.
     if request.local_urls_only {
@@ -626,6 +641,48 @@ fn create_blank_reply(url: ServoUrl, timing_type: ResourceTimingType) -> Respons
     response
 }
 
+/// Handle a request from the user interface to ignore validation errors for a certificate.
+fn handle_allowcert_request(request: &mut Request, context: &FetchContext) -> io::Result<()> {
+    let error = |string| Err(io::Error::new(io::ErrorKind::Other, string));
+
+    let body = match request.body.as_mut() {
+        Some(body) => body,
+        None => return error("No body found"),
+    };
+
+    let stream = body.take_stream();
+    let stream = stream.lock().unwrap();
+    let (body_chan, body_port) = ipc::channel().unwrap();
+    let _ = stream.send(BodyChunkRequest::Connect(body_chan));
+    let _ = stream.send(BodyChunkRequest::Chunk);
+    let body_bytes = match body_port.recv().ok() {
+        Some(BodyChunkResponse::Chunk(bytes)) => bytes,
+        _ => return error("Certificate not sent in a single chunk"),
+    };
+
+    let split_idx = match body_bytes.iter().position(|b| *b == b'&') {
+        Some(split_idx) => split_idx,
+        None => return error("Could not find ampersand in data"),
+    };
+    let (secret, cert_base64) = body_bytes.split_at(split_idx);
+
+    let secret = str::from_utf8(secret).ok().and_then(|s| s.parse().ok());
+    if secret != Some(*net_traits::PRIVILEGED_SECRET) {
+        return error("Invalid secret sent. Ignoring request");
+    }
+
+    let cert_bytes = match general_purpose::STANDARD_NO_PAD.decode(&cert_base64[1..]) {
+        Ok(bytes) => bytes,
+        Err(_) => return error("Could not decode certificate base64"),
+    };
+
+    context
+        .state
+        .override_manager
+        .add_override(&Certificate(cert_bytes));
+    Ok(())
+}
+
 /// [Scheme fetch](https://fetch.spec.whatwg.org#scheme-fetch)
 async fn scheme_fetch(
     request: &mut Request,
@@ -640,31 +697,9 @@ async fn scheme_fetch(
         "about" if url.path() == "blank" => create_blank_reply(url, request.timing_type()),
 
         "chrome" if url.path() == "allowcert" => {
-            let data = request.body.as_mut().and_then(|body| {
-                let stream = body.take_stream();
-                let stream = stream.lock().unwrap();
-                let (body_chan, body_port) = ipc::channel().unwrap();
-                let _ = stream.send(BodyChunkRequest::Connect(body_chan));
-                let _ = stream.send(BodyChunkRequest::Chunk);
-                match body_port.recv().ok() {
-                    Some(BodyChunkResponse::Chunk(bytes)) => Some(bytes),
-                    _ => panic!("cert should be sent in a single chunk."),
-                }
-            });
-            let data = data.as_ref().and_then(|b| {
-                let idx = b.iter().position(|b| *b == b'&')?;
-                Some(b.split_at(idx))
-            });
-
-            if let Some((secret, bytes)) = data {
-                let secret = str::from_utf8(secret).ok().and_then(|s| s.parse().ok());
-                if secret == Some(*net_traits::PRIVILEGED_SECRET) {
-                    if let Ok(bytes) = base64::decode(&bytes[1..]) {
-                        context.state.extra_certs.add(bytes);
-                    }
-                }
+            if let Err(error) = handle_allowcert_request(request, context) {
+                warn!("Could not handle allowcert request: {error}");
             }
-
             create_blank_reply(url, request.timing_type())
         },
 

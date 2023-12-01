@@ -108,7 +108,6 @@ class CheckTidiness(unittest.TestCase):
         errors = tidy.collect_errors_for_files(iterFile('rust_tidy.rs'), [], [tidy.check_rust], print_text=False)
         self.assertTrue('mod declaration is not in alphabetical order' in next(errors)[2])
         self.assertEqual('mod declaration spans multiple lines', next(errors)[2])
-        self.assertTrue('extern crate declaration is not in alphabetical order' in next(errors)[2])
         self.assertTrue('derivable traits list is not in alphabetical order' in next(errors)[2])
         self.assertEqual('found an empty line following a {', next(errors)[2])
         self.assertEqual('use &[T] instead of &Vec<T>', next(errors)[2])
@@ -178,21 +177,6 @@ class CheckTidiness(unittest.TestCase):
         tidy.config["check-ordered-json-keys"].append('python/tidy/tests/unordered_key.json')
         errors = tidy.collect_errors_for_files(iterFile('unordered_key.json'), [tidy.check_json], [], print_text=False)
         self.assertEqual('Unordered key (found b before a)', next(errors)[2])
-        self.assertNoMoreErrors(errors)
-
-    def test_yaml_with_duplicate_key(self):
-        errors = tidy.collect_errors_for_files(iterFile('duplicate_keys_buildbot_steps.yml'), [tidy.check_yaml], [], print_text=False)
-        self.assertEqual('Duplicated Key (duplicate_yaml_key)', next(errors)[2])
-        self.assertNoMoreErrors(errors)
-
-    def test_non_list_mapped_buildbot_steps(self):
-        errors = tidy.collect_errors_for_files(iterFile('non_list_mapping_buildbot_steps.yml'), [tidy.check_yaml], [], print_text=False)
-        self.assertEqual("expected a list for dictionary value @ data['non-list-key']", next(errors)[2])
-        self.assertNoMoreErrors(errors)
-
-    def test_non_string_list_mapping_buildbot_steps(self):
-        errors = tidy.collect_errors_for_files(iterFile('non_string_list_buildbot_steps.yml'), [tidy.check_yaml], [], print_text=False)
-        self.assertEqual("expected str @ data['mapping_key'][0]", next(errors)[2])
         self.assertNoMoreErrors(errors)
 
     def test_lock(self):

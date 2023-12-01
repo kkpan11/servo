@@ -2,13 +2,24 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
+use std::cell::Cell;
+use std::rc::Rc;
+use std::sync::{mpsc, Arc, Mutex};
+use std::thread::Builder;
+
+use dom_struct::dom_struct;
+use js::rust::HandleObject;
+use msg::constellation_msg::PipelineId;
+use servo_media::audio::context::OfflineAudioContextOptions as ServoMediaOfflineAudioContextOptions;
+
 use crate::dom::audiobuffer::{AudioBuffer, MAX_SAMPLE_RATE, MIN_SAMPLE_RATE};
 use crate::dom::audionode::MAX_CHANNEL_COUNT;
 use crate::dom::baseaudiocontext::{BaseAudioContext, BaseAudioContextOptions};
 use crate::dom::bindings::cell::DomRefCell;
-use crate::dom::bindings::codegen::Bindings::BaseAudioContextBinding::BaseAudioContextBinding::BaseAudioContextMethods;
-use crate::dom::bindings::codegen::Bindings::OfflineAudioContextBinding::OfflineAudioContextMethods;
-use crate::dom::bindings::codegen::Bindings::OfflineAudioContextBinding::OfflineAudioContextOptions;
+use crate::dom::bindings::codegen::Bindings::BaseAudioContextBinding::BaseAudioContext_Binding::BaseAudioContextMethods;
+use crate::dom::bindings::codegen::Bindings::OfflineAudioContextBinding::{
+    OfflineAudioContextMethods, OfflineAudioContextOptions,
+};
 use crate::dom::bindings::error::{Error, Fallible};
 use crate::dom::bindings::inheritance::Castable;
 use crate::dom::bindings::num::Finite;
@@ -21,15 +32,6 @@ use crate::dom::promise::Promise;
 use crate::dom::window::Window;
 use crate::realms::InRealm;
 use crate::task_source::TaskSource;
-use dom_struct::dom_struct;
-use js::rust::HandleObject;
-use msg::constellation_msg::PipelineId;
-use servo_media::audio::context::OfflineAudioContextOptions as ServoMediaOfflineAudioContextOptions;
-use std::cell::Cell;
-use std::rc::Rc;
-use std::sync::mpsc;
-use std::sync::{Arc, Mutex};
-use std::thread::Builder;
 
 #[dom_struct]
 pub struct OfflineAudioContext {
@@ -43,7 +45,7 @@ pub struct OfflineAudioContext {
 
 #[allow(non_snake_case)]
 impl OfflineAudioContext {
-    #[allow(unrooted_must_root)]
+    #[allow(crown::unrooted_must_root)]
     fn new_inherited(
         channel_count: u32,
         length: u32,
@@ -68,7 +70,7 @@ impl OfflineAudioContext {
         }
     }
 
-    #[allow(unrooted_must_root)]
+    #[allow(crown::unrooted_must_root)]
     fn new(
         window: &Window,
         proto: Option<HandleObject>,

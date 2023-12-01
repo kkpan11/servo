@@ -143,6 +143,7 @@ pub mod htmlconstructor;
 pub mod inheritance;
 pub mod interface;
 pub mod iterable;
+pub mod like;
 pub mod namespace;
 pub mod num;
 pub mod principals;
@@ -164,7 +165,7 @@ pub mod xmlname;
 /// Generated JS-Rust bindings.
 #[allow(missing_docs, non_snake_case)]
 pub mod codegen {
-    #[allow(dead_code, unrooted_must_root)]
+    #[allow(dead_code, crown::unrooted_must_root)]
     pub mod Bindings {
         include!(concat!(env!("OUT_DIR"), "/Bindings/mod.rs"));
     }

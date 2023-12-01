@@ -2,6 +2,23 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
+use canvas_traits::canvas::{CanvasId, CanvasMsg, FromScriptMsg};
+use canvas_traits::webgl::{GLContextAttributes, WebGLVersion};
+use dom_struct::dom_struct;
+use euclid::default::{Rect, Size2D};
+use html5ever::{local_name, namespace_url, ns, LocalName, Prefix};
+use image::codecs::png::PngEncoder;
+use image::{ColorType, ImageEncoder};
+use ipc_channel::ipc::{self as ipcchan, IpcSharedMemory};
+use js::error::throw_type_error;
+use js::rust::{HandleObject, HandleValue};
+use profile_traits::ipc;
+use script_layout_interface::{HTMLCanvasData, HTMLCanvasDataSource};
+use script_traits::ScriptMsg;
+use servo_media::streams::registry::MediaStreamId;
+use servo_media::streams::MediaStreamType;
+use style::attr::{AttrValue, LengthOrPercentageOrAuto};
+
 use crate::dom::attr::Attr;
 use crate::dom::bindings::cell::{ref_filter_map, DomRefCell, Ref};
 use crate::dom::bindings::codegen::Bindings::HTMLCanvasElementBinding::{
@@ -31,28 +48,11 @@ use crate::dom::virtualmethods::VirtualMethods;
 use crate::dom::webgl2renderingcontext::WebGL2RenderingContext;
 use crate::dom::webglrenderingcontext::WebGLRenderingContext;
 use crate::script_runtime::JSContext;
-use base64;
-use canvas_traits::canvas::{CanvasId, CanvasMsg, FromScriptMsg};
-use canvas_traits::webgl::{GLContextAttributes, WebGLVersion};
-use dom_struct::dom_struct;
-use euclid::default::{Rect, Size2D};
-use html5ever::{LocalName, Prefix};
-use image::codecs::png::PngEncoder;
-use image::{ColorType, ImageEncoder};
-use ipc_channel::ipc::{self as ipcchan, IpcSharedMemory};
-use js::error::throw_type_error;
-use js::rust::{HandleObject, HandleValue};
-use profile_traits::ipc;
-use script_layout_interface::{HTMLCanvasData, HTMLCanvasDataSource};
-use script_traits::ScriptMsg;
-use servo_media::streams::registry::MediaStreamId;
-use servo_media::streams::MediaStreamType;
-use style::attr::{AttrValue, LengthOrPercentageOrAuto};
 
 const DEFAULT_WIDTH: u32 = 300;
 const DEFAULT_HEIGHT: u32 = 150;
 
-#[unrooted_must_root_lint::must_root]
+#[crown::unrooted_must_root_lint::must_root]
 #[derive(Clone, JSTraceable, MallocSizeOf)]
 pub enum CanvasContext {
     Context2d(Dom<CanvasRenderingContext2D>),
@@ -79,7 +79,7 @@ impl HTMLCanvasElement {
         }
     }
 
-    #[allow(unrooted_must_root)]
+    #[allow(crown::unrooted_must_root)]
     pub fn new(
         local_name: LocalName,
         prefix: Option<Prefix>,
@@ -270,9 +270,8 @@ impl HTMLCanvasElement {
             .script_to_constellation_chan()
             .send(ScriptMsg::GetWebGPUChan(sender));
         let window = window_from_node(self);
-        let size = self.get_size();
         let channel = receiver.recv().expect("Failed to get WebGPU channel");
-        let context = GPUCanvasContext::new(window.upcast::<GlobalScope>(), self, size, channel);
+        let context = GPUCanvasContext::new(window.upcast::<GlobalScope>(), self, channel);
         *self.context.borrow_mut() = Some(CanvasContext::WebGPU(Dom::from_ref(&*context)));
         Some(context)
     }
@@ -375,7 +374,7 @@ impl HTMLCanvasElementMethods for HTMLCanvasElement {
             "webgl2" | "experimental-webgl2" => self
                 .get_or_init_webgl2_context(cx, options)
                 .map(RenderingContext::WebGL2RenderingContext),
-            "gpupresent" => self
+            "webgpu" => self
                 .get_or_init_webgpu_context()
                 .map(RenderingContext::GPUCanvasContext),
             _ => None,
@@ -425,16 +424,17 @@ impl HTMLCanvasElementMethods for HTMLCanvasElement {
         };
 
         // FIXME: Only handle image/png for now.
-        let mut png = Vec::new();
+        let mut url = "data:image/png;base64,".to_owned();
+        let mut encoder = base64::write::EncoderStringWriter::from_consumer(
+            &mut url,
+            &base64::engine::general_purpose::STANDARD,
+        );
         // FIXME(nox): https://github.com/image-rs/image-png/issues/86
         // FIXME(nox): https://github.com/image-rs/image-png/issues/87
-        PngEncoder::new(&mut png)
+        PngEncoder::new(&mut encoder)
             .write_image(&file, self.Width(), self.Height(), ColorType::Rgba8)
             .unwrap();
-        let mut url = "data:image/png;base64,".to_owned();
-        // FIXME(nox): Should this use base64::URL_SAFE?
-        // FIXME(nox): https://github.com/marshallpierce/rust-base64/pull/56
-        base64::encode_config_buf(&png, base64::STANDARD, &mut url);
+        encoder.into_inner();
         Ok(USVString(url))
     }
 
@@ -487,10 +487,11 @@ impl<'a> From<&'a WebGLContextAttributes> for GLContextAttributes {
 }
 
 pub mod utils {
-    use crate::dom::window::Window;
     use net_traits::image_cache::ImageResponse;
     use net_traits::request::CorsSettings;
     use servo_url::ServoUrl;
+
+    use crate::dom::window::Window;
 
     pub fn request_image_from_cache(
         window: &Window,

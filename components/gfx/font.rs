@@ -2,6 +2,27 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
+use std::borrow::ToOwned;
+use std::cell::RefCell;
+use std::collections::HashMap;
+use std::rc::Rc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
+use std::{iter, str};
+
+use app_units::Au;
+use bitflags::bitflags;
+use euclid::default::{Point2D, Rect, Size2D};
+use log::debug;
+use serde::{Deserialize, Serialize};
+use servo_atoms::{atom, Atom};
+use smallvec::SmallVec;
+use style::computed_values::{font_stretch, font_style, font_variant_caps, font_weight};
+use style::properties::style_structs::Font as FontStyleStruct;
+use style::values::computed::font::{GenericFontFamily, SingleFontFamily};
+use unicode_script::Script;
+use webrender_api::FontInstanceKey;
+
 use crate::font_context::{FontContext, FontSource};
 use crate::font_template::FontTemplateDescriptor;
 use crate::platform::font::{FontHandle, FontTable};
@@ -11,24 +32,8 @@ use crate::platform::font_template::FontTemplateData;
 use crate::text::glyph::{ByteIndex, GlyphData, GlyphId, GlyphStore};
 use crate::text::shaping::ShaperMethods;
 use crate::text::Shaper;
-use app_units::Au;
-use euclid::default::{Point2D, Rect, Size2D};
-use servo_atoms::Atom;
-use smallvec::SmallVec;
-use std::borrow::ToOwned;
-use std::cell::RefCell;
-use std::collections::HashMap;
-use std::iter;
-use std::rc::Rc;
-use std::str;
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Arc;
-use style::computed_values::{font_stretch, font_style, font_variant_caps, font_weight};
-use style::properties::style_structs::Font as FontStyleStruct;
-use style::values::computed::font::{GenericFontFamily, SingleFontFamily};
-use unicode_script::Script;
-use webrender_api::FontInstanceKey;
 
+#[macro_export]
 macro_rules! ot_tag {
     ($t1:expr, $t2:expr, $t3:expr, $t4:expr) => {
         (($t1 as u32) << 24) | (($t2 as u32) << 16) | (($t3 as u32) << 8) | ($t4 as u32)
@@ -132,7 +137,7 @@ impl<'a> From<&'a FontStyleStruct> for FontDescriptor {
         FontDescriptor {
             template_descriptor: FontTemplateDescriptor::from(style),
             variant: style.font_variant_caps,
-            pt_size: Au::from_f32_px(style.font_size.size().px()),
+            pt_size: Au::from_f32_px(style.font_size.computed_size().px()),
         }
     }
 }
@@ -177,16 +182,17 @@ impl Font {
 }
 
 bitflags! {
+    #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
     pub struct ShapingFlags: u8 {
-        #[doc = "Set if the text is entirely whitespace."]
+        /// Set if the text is entirely whitespace.
         const IS_WHITESPACE_SHAPING_FLAG = 0x01;
-        #[doc = "Set if we are to ignore ligatures."]
+        /// Set if we are to ignore ligatures.
         const IGNORE_LIGATURES_SHAPING_FLAG = 0x02;
-        #[doc = "Set if we are to disable kerning."]
+        /// Set if we are to disable kerning.
         const DISABLE_KERNING_SHAPING_FLAG = 0x04;
-        #[doc = "Text direction is right-to-left."]
+        /// Text direction is right-to-left.
         const RTL_FLAG = 0x08;
-        #[doc = "Set if word-break is set to keep-all."]
+        /// Set if word-break is set to keep-all.
         const KEEP_ALL_FLAG = 0x10;
     }
 }

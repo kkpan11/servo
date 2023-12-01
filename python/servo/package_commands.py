@@ -7,8 +7,6 @@
 # option. This file may not be copied, modified, or distributed
 # except according to those terms.
 
-from __future__ import absolute_import, print_function, unicode_literals
-
 from datetime import datetime
 from github import Github
 
@@ -20,7 +18,6 @@ import os.path as path
 import shutil
 import subprocess
 import sys
-import tempfile
 
 from mach.decorators import (
     CommandArgument,
@@ -30,6 +27,7 @@ from mach.decorators import (
 from mach.registrar import Registrar
 
 from servo.command_base import (
+    BuildType,
     archive_deterministically,
     BuildNotFound,
     cd,
@@ -37,7 +35,7 @@ from servo.command_base import (
     is_macosx,
     is_windows,
 )
-from servo.build_commands import copy_dependencies, change_rpath_in_binary
+from servo.build_commands import copy_dependencies
 from servo.gstreamer import macos_gst_root
 from servo.util import delete, get_target_dir
 
@@ -47,25 +45,22 @@ sys.path.append(path.join(path.dirname(__file__), "..", "..",
 
 PACKAGES = {
     'android': [
-        'android/armv7-linux-androideabi/release/servoapp.apk',
-        'android/armv7-linux-androideabi/release/servoview.aar',
+        'android/armv7-linux-androideabi/production/servoapp.apk',
+        'android/armv7-linux-androideabi/production/servoview.aar',
     ],
     'linux': [
-        'release/servo-tech-demo.tar.gz',
+        'production/servo-tech-demo.tar.gz',
     ],
     'mac': [
-        'release/servo-tech-demo.dmg',
-    ],
-    'macbrew': [
-        'release/brew/servo.tar.gz',
+        'production/servo-tech-demo.dmg',
     ],
     'maven': [
         'android/gradle/servoview/maven/org/mozilla/servoview/servoview-armv7/',
         'android/gradle/servoview/maven/org/mozilla/servoview/servoview-x86/',
     ],
     'windows-msvc': [
-        r'release\msi\Servo.exe',
-        r'release\msi\Servo.zip',
+        r'production\msi\Servo.exe',
+        r'production\msi\Servo.zip',
     ],
 }
 
@@ -116,10 +111,6 @@ class PackageCommands(CommandBase):
     @Command('package',
              description='Package Servo',
              category='package')
-    @CommandArgument('--release', '-r', action='store_true',
-                     help='Package the release build')
-    @CommandArgument('--dev', '-d', action='store_true',
-                     help='Package the dev build')
     @CommandArgument('--android',
                      default=None,
                      action='store_true',
@@ -134,8 +125,8 @@ class PackageCommands(CommandBase):
                      default=None,
                      action='store_true',
                      help='Create a local Maven repository')
-    def package(self, release=False, dev=False, android=None, target=None,
-                flavor=None, maven=False):
+    @CommandBase.common_command_arguments(build_configuration=False, build_type=True)
+    def package(self, build_type: BuildType, android=None, target=None, flavor=None, maven=False):
         if android is None:
             android = self.config["build"]["android"]
         if target and android:
@@ -148,26 +139,26 @@ class PackageCommands(CommandBase):
 
         self.cross_compile_target = target
         env = self.build_env()
-        binary_path = self.get_binary_path(
-            release, dev, target=target, android=android,
-        )
+        binary_path = self.get_binary_path(build_type, target=target, android=android)
         dir_to_root = self.get_top_dir()
         target_dir = path.dirname(binary_path)
         if android:
             android_target = self.config["android"]["target"]
             if "aarch64" in android_target:
-                build_type = "Arm64"
+                arch_string = "Arm64"
             elif "armv7" in android_target:
-                build_type = "Armv7"
+                arch_string = "Armv7"
             elif "i686" in android_target:
-                build_type = "x86"
+                arch_string = "x86"
             else:
-                build_type = "Arm"
+                arch_string = "Arm"
 
-            if dev:
-                build_mode = "Debug"
+            if build_type.is_dev():
+                build_type_string = "Debug"
+            elif build_type.is_release():
+                build_type_string = "Release"
             else:
-                build_mode = "Release"
+                raise Exception("TODO what should this be?")
 
             flavor_name = "Main"
             if flavor is not None:
@@ -182,7 +173,7 @@ class PackageCommands(CommandBase):
             shutil.copytree(path.join(dir_to_root, 'resources'), dir_to_resources)
             change_prefs(dir_to_resources, "android", vr=vr)
 
-            variant = ":assemble" + flavor_name + build_type + build_mode
+            variant = ":assemble" + flavor_name + arch_string + build_type_string
             apk_task_name = ":servoapp" + variant
             aar_task_name = ":servoview" + variant
             maven_task_name = ":servoview:uploadArchive"
@@ -261,34 +252,6 @@ class PackageCommands(CommandBase):
             delete(dir_to_dmg)
             print("Packaged Servo into " + dmg_path)
 
-            print("Creating brew package")
-            dir_to_brew = path.join(target_dir, 'brew_tmp')
-            dir_to_tar = path.join(target_dir, 'brew')
-            if not path.exists(dir_to_tar):
-                os.makedirs(dir_to_tar)
-            tar_path = path.join(dir_to_tar, "servo.tar.gz")
-            if path.exists(dir_to_brew):
-                print("Cleaning up from previous packaging")
-                delete(dir_to_brew)
-            if path.exists(tar_path):
-                print("Deleting existing package")
-                os.remove(tar_path)
-            shutil.copytree(path.join(dir_to_root, 'resources'), path.join(dir_to_brew, 'resources'))
-            os.makedirs(path.join(dir_to_brew, 'bin'))
-            # Note that in the context of Homebrew, libexec is reserved for private use by the formula
-            # and therefore is not symlinked into HOMEBREW_PREFIX.
-            # The 'lib' sub-directory within 'libexec' is necessary to satisfy
-            # rpath relative install_names in the gstreamer packages
-            brew_servo_bin = path.join(dir_to_brew, 'bin', 'servo')
-            shutil.copy2(binary_path, brew_servo_bin)
-            change_rpath_in_binary(
-                brew_servo_bin, '@executable_path/lib/', '@executable_path/../libexec/lib/')
-            dir_to_lib = path.join(dir_to_brew, 'libexec', 'lib')
-            os.makedirs(dir_to_lib)
-            copy_dependencies(brew_servo_bin, dir_to_lib, dir_to_gst_lib)
-            archive_deterministically(dir_to_brew, tar_path, prepend_path='servo/')
-            delete(dir_to_brew)
-            print("Packaged Servo into " + tar_path)
         elif is_windows():
             dir_to_msi = path.join(target_dir, 'msi')
             if path.exists(dir_to_msi):
@@ -386,10 +349,6 @@ class PackageCommands(CommandBase):
     @Command('install',
              description='Install Servo (currently, Android and Windows only)',
              category='package')
-    @CommandArgument('--release', '-r', action='store_true',
-                     help='Install the release build')
-    @CommandArgument('--dev', '-d', action='store_true',
-                     help='Install the dev build')
     @CommandArgument('--android',
                      action='store_true',
                      help='Install on Android')
@@ -402,7 +361,8 @@ class PackageCommands(CommandBase):
     @CommandArgument('--target', '-t',
                      default=None,
                      help='Install the given target platform')
-    def install(self, release=False, dev=False, android=False, emulator=False, usb=False, target=None):
+    @CommandBase.common_command_arguments(build_configuration=False, build_type=True)
+    def install(self, build_type: BuildType, android=False, emulator=False, usb=False, target=None):
         if target and android:
             print("Please specify either --target or --android.")
             sys.exit(1)
@@ -412,21 +372,21 @@ class PackageCommands(CommandBase):
 
         env = self.build_env()
         try:
-            binary_path = self.get_binary_path(release, dev, android=android)
+            binary_path = self.get_binary_path(build_type, android=android)
         except BuildNotFound:
             print("Servo build not found. Building servo...")
             result = Registrar.dispatch(
-                "build", context=self.context, release=release, dev=dev, android=android,
+                "build", context=self.context, build_type=build_type, android=android,
             )
             if result:
                 return result
             try:
-                binary_path = self.get_binary_path(release, dev, android=android)
+                binary_path = self.get_binary_path(build_type, android=android)
             except BuildNotFound:
                 print("Rebuilding Servo did not solve the missing build problem.")
                 return 1
         if android:
-            pkg_path = self.get_apk_path(release)
+            pkg_path = self.get_apk_path(build_type)
             exec_command = [self.android_adb_path(env)]
             if emulator and usb:
                 print("Cannot install to both emulator and USB at the same time.")
@@ -443,7 +403,7 @@ class PackageCommands(CommandBase):
         if not path.exists(pkg_path):
             print("Servo package not found. Packaging servo...")
             result = Registrar.dispatch(
-                "package", context=self.context, release=release, dev=dev, android=android,
+                "package", context=self.context, build_type=build_type, android=android,
             )
             if result != 0:
                 return result
@@ -577,59 +537,6 @@ class PackageCommands(CommandBase):
                     print("Uploading %s to %s" % (os.path.join(base_dir, f), file_upload_key))
                     s3.upload_file(os.path.join(base_dir, f), BUCKET, file_upload_key)
 
-        def update_brew(package, timestamp):
-            print("Updating brew formula")
-
-            package_url = 'https://download.servo.org/nightly/macbrew/{}'.format(
-                nightly_filename(package, timestamp)
-            )
-            with open(package) as p:
-                digest = hashlib.sha256(p.read()).hexdigest()
-
-            brew_version = timestamp.strftime('%Y.%m.%d')
-
-            with tempfile.TemporaryDirectory(prefix='homebrew-servo') as tmp_dir:
-                def call_git(cmd, **kwargs):
-                    subprocess.check_call(
-                        ['git', '-C', tmp_dir] + cmd,
-                        **kwargs
-                    )
-
-                call_git([
-                    'clone',
-                    'https://github.com/servo/homebrew-servo.git',
-                    '.',
-                ])
-
-                script_dir = path.dirname(path.realpath(__file__))
-                with open(path.join(script_dir, 'servo-binary-formula.rb.in')) as f:
-                    formula = f.read()
-                formula = formula.replace('PACKAGEURL', package_url)
-                formula = formula.replace('SHA', digest)
-                formula = formula.replace('VERSION', brew_version)
-                with open(path.join(tmp_dir, 'Formula', 'servo-bin.rb'), 'w') as f:
-                    f.write(formula)
-
-                call_git(['add', path.join('.', 'Formula', 'servo-bin.rb')])
-                call_git([
-                    '-c', 'user.name=Tom Servo',
-                    '-c', 'user.email=servo@servo.org',
-                    'commit',
-                    '--message=Version Bump: {}'.format(brew_version),
-                ])
-
-                token = os.environ['GITHUB_HOMEBREW_TOKEN']
-
-                push_url = 'https://{}@github.com/servo/homebrew-servo.git'
-                # TODO(aneeshusa): Use subprocess.DEVNULL with Python 3.3+
-                with open(os.devnull, 'wb') as DEVNULL:
-                    call_git([
-                        'push',
-                        '-qf',
-                        push_url.format(token),
-                        'master',
-                    ], stdout=DEVNULL, stderr=DEVNULL)
-
         timestamp = datetime.utcnow().replace(microsecond=0)
         for package in packages_for_platform(platform):
             if path.isdir(package):
@@ -658,10 +565,5 @@ class PackageCommands(CommandBase):
         if platform == 'maven':
             for package in packages_for_platform(platform):
                 update_maven(package)
-
-        if platform == 'macbrew':
-            packages = list(packages_for_platform(platform))
-            assert(len(packages) == 1)
-            update_brew(packages[0], timestamp)
 
         return 0

@@ -2,13 +2,6 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
-use crate::dom::bindings::codegen::Bindings::WindowBinding::WindowBinding::WindowMethods;
-use crate::dom::bindings::error::Fallible;
-use crate::dom::bindings::reflector::Reflector;
-use crate::dom::bindings::root::DomRoot;
-use crate::dom::bindings::str::DOMString;
-use crate::dom::window::Window;
-use crate::dom::worklet::Worklet;
 use cssparser::{serialize_identifier, Parser, ParserInput};
 use dom_struct::dom_struct;
 use style::context::QuirksMode;
@@ -16,6 +9,14 @@ use style::parser::ParserContext;
 use style::stylesheets::supports_rule::{parse_condition_or_declaration, Declaration};
 use style::stylesheets::{CssRuleType, Origin};
 use style_traits::ParsingMode;
+
+use crate::dom::bindings::codegen::Bindings::WindowBinding::Window_Binding::WindowMethods;
+use crate::dom::bindings::error::Fallible;
+use crate::dom::bindings::reflector::Reflector;
+use crate::dom::bindings::root::DomRoot;
+use crate::dom::bindings::str::DOMString;
+use crate::dom::window::Window;
+use crate::dom::worklet::Worklet;
 
 #[dom_struct]
 pub struct CSS {
@@ -45,6 +46,7 @@ impl CSS {
             Some(CssRuleType::Style),
             ParsingMode::DEFAULT,
             QuirksMode::NoQuirks,
+            /* namespaces = */ Default::default(),
             None,
             None,
         );
@@ -67,10 +69,11 @@ impl CSS {
             Some(CssRuleType::Style),
             ParsingMode::DEFAULT,
             QuirksMode::NoQuirks,
+            /* namespaces = */ Default::default(),
             None,
             None,
         );
-        cond.eval(&context, &Default::default())
+        cond.eval(&context)
     }
 
     /// <https://drafts.css-houdini.org/css-paint-api-1/#paint-worklet>

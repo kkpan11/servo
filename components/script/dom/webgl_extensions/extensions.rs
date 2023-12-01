@@ -2,6 +2,16 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
+use std::collections::HashMap;
+use std::iter::FromIterator;
+use std::ptr::NonNull;
+
+use canvas_traits::webgl::{GlType, TexFormat, WebGLSLVersion, WebGLVersion};
+use fnv::{FnvHashMap, FnvHashSet};
+use js::jsapi::JSObject;
+use malloc_size_of::MallocSizeOf;
+use sparkle::gl::{self, GLenum};
+
 use super::wrapper::{TypedWebGLExtensionWrapper, WebGLExtensionWrapper};
 use super::{ext, WebGLExtension, WebGLExtensionSpec};
 use crate::dom::bindings::cell::DomRefCell;
@@ -18,14 +28,6 @@ use crate::dom::oestexturehalffloat::OESTextureHalfFloat;
 use crate::dom::webglcolorbufferfloat::WEBGLColorBufferFloat;
 use crate::dom::webglrenderingcontext::WebGLRenderingContext;
 use crate::dom::webgltexture::TexCompression;
-use canvas_traits::webgl::{GlType, TexFormat, WebGLSLVersion, WebGLVersion};
-use fnv::{FnvHashMap, FnvHashSet};
-use js::jsapi::JSObject;
-use malloc_size_of::MallocSizeOf;
-use sparkle::gl::{self, GLenum};
-use std::collections::HashMap;
-use std::iter::FromIterator;
-use std::ptr::NonNull;
 
 // Data types that are implemented for texImage2D and texSubImage2D in a WebGL 1.0 context
 // but must trigger a InvalidValue error until the related WebGL Extensions are enabled.
@@ -82,6 +84,7 @@ struct WebGLExtensionFeatures {
     gl_extensions: FnvHashSet<String>,
     disabled_tex_types: FnvHashSet<GLenum>,
     not_filterable_tex_types: FnvHashSet<GLenum>,
+    #[no_trace]
     effective_tex_internal_formats: FnvHashMap<TexFormatType, TexFormat>,
     /// WebGL Hint() targets enabled by extensions.
     hint_targets: FnvHashSet<GLenum>,
@@ -161,13 +164,16 @@ impl WebGLExtensionFeatures {
 }
 
 /// Handles the list of implemented, supported and enabled WebGL extensions.
-#[unrooted_must_root_lint::must_root]
+#[crown::unrooted_must_root_lint::must_root]
 #[derive(JSTraceable, MallocSizeOf)]
 pub struct WebGLExtensions {
     extensions: DomRefCell<HashMap<String, Box<dyn WebGLExtensionWrapper>>>,
     features: DomRefCell<WebGLExtensionFeatures>,
+    #[no_trace]
     webgl_version: WebGLVersion,
+    #[no_trace]
     api_type: GlType,
+    #[no_trace]
     glsl_version: WebGLSLVersion,
 }
 
@@ -466,5 +472,5 @@ impl WebGLExtensions {
 }
 
 // Helper structs
-#[derive(Eq, Hash, JSTraceable, MallocSizeOf, PartialEq)]
+#[derive(Eq, Hash, MallocSizeOf, PartialEq)]
 struct TexFormatType(TexFormat, u32);

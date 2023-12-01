@@ -2,9 +2,18 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
+use dom_struct::dom_struct;
+use servo_arc::Arc;
+use servo_atoms::Atom;
+use style::author_styles::AuthorStyles;
+use style::dom::TElement;
+use style::shared_lock::SharedRwLockReadGuard;
+use style::stylesheets::Stylesheet;
+use style::stylist::{CascadeData, Stylist};
+
 use crate::dom::bindings::cell::DomRefCell;
-use crate::dom::bindings::codegen::Bindings::ShadowRootBinding::ShadowRootBinding::ShadowRootMethods;
 use crate::dom::bindings::codegen::Bindings::ShadowRootBinding::ShadowRootMode;
+use crate::dom::bindings::codegen::Bindings::ShadowRootBinding::ShadowRoot_Binding::ShadowRootMethods;
 use crate::dom::bindings::inheritance::Castable;
 use crate::dom::bindings::num::Finite;
 use crate::dom::bindings::reflector::reflect_dom_object;
@@ -18,14 +27,6 @@ use crate::dom::node::{Node, NodeDamage, NodeFlags, ShadowIncluding, UnbindConte
 use crate::dom::stylesheetlist::{StyleSheetList, StyleSheetListOwner};
 use crate::dom::window::Window;
 use crate::stylesheet_set::StylesheetSetRef;
-use dom_struct::dom_struct;
-use servo_arc::Arc;
-use servo_atoms::Atom;
-use style::author_styles::AuthorStyles;
-use style::dom::TElement;
-use style::shared_lock::SharedRwLockReadGuard;
-use style::stylesheets::Stylesheet;
-use style::stylist::{CascadeData, Stylist};
 
 /// Whether a shadow root hosts an User Agent widget.
 #[derive(JSTraceable, MallocSizeOf, PartialEq)]
@@ -42,13 +43,14 @@ pub struct ShadowRoot {
     document: Dom<Document>,
     host: MutNullableDom<Element>,
     /// List of author styles associated with nodes in this shadow tree.
+    #[custom_trace]
     author_styles: DomRefCell<AuthorStyles<StyleSheetInDocument>>,
     stylesheet_list: MutNullableDom<StyleSheetList>,
     window: Dom<Window>,
 }
 
 impl ShadowRoot {
-    #[allow(unrooted_must_root)]
+    #[allow(crown::unrooted_must_root)]
     fn new_inherited(host: &Element, document: &Document) -> ShadowRoot {
         let document_fragment = DocumentFragment::new_inherited(document);
         let node = document_fragment.upcast::<Node>();
@@ -102,7 +104,7 @@ impl ShadowRoot {
 
     /// Add a stylesheet owned by `owner` to the list of shadow root sheets, in the
     /// correct tree position.
-    #[allow(unrooted_must_root)] // Owner needs to be rooted already necessarily.
+    #[allow(crown::unrooted_must_root)] // Owner needs to be rooted already necessarily.
     pub fn add_stylesheet(&self, owner: &Element, sheet: Arc<Stylesheet>) {
         let stylesheets = &mut self.author_styles.borrow_mut().stylesheets;
         let insertion_point = stylesheets
@@ -123,7 +125,7 @@ impl ShadowRoot {
     }
 
     /// Remove a stylesheet owned by `owner` from the list of shadow root sheets.
-    #[allow(unrooted_must_root)] // Owner needs to be rooted already necessarily.
+    #[allow(crown::unrooted_must_root)] // Owner needs to be rooted already necessarily.
     pub fn remove_stylesheet(&self, owner: &Element, s: &Arc<Stylesheet>) {
         DocumentOrShadowRoot::remove_stylesheet(
             owner,

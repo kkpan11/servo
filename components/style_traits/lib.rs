@@ -8,18 +8,17 @@
 
 #![crate_name = "style_traits"]
 #![crate_type = "rlib"]
-#![deny(unsafe_code, missing_docs)]
 
 use bitflags::bitflags;
+use cssparser::{CowRcStr, Token};
 use malloc_size_of_derive::MallocSizeOf;
+use selectors::parser::SelectorParseErrorKind;
 use serde::{Deserialize, Serialize};
 #[cfg(feature = "servo")]
-pub use webrender_api::units::DevicePixel;
-
-use cssparser::{CowRcStr, Token};
-use selectors::parser::SelectorParseErrorKind;
-#[cfg(feature = "servo")]
 use servo_atoms::Atom;
+use size_of_test::size_of_test;
+#[cfg(feature = "servo")]
+pub use webrender_api::units::DevicePixel;
 
 /// One hardware pixel.
 ///
@@ -69,8 +68,6 @@ pub mod dom;
 pub mod specified_value_info;
 #[macro_use]
 pub mod values;
-#[macro_use]
-pub mod viewport;
 pub mod owned_slice;
 pub mod owned_str;
 
@@ -81,9 +78,11 @@ pub use crate::values::{
 
 /// The error type for all CSS parsing routines.
 pub type ParseError<'i> = cssparser::ParseError<'i, StyleParseErrorKind<'i>>;
+size_of_test!(ParseError, 64);
 
 /// Error in property value parsing
 pub type ValueParseError<'i> = cssparser::ParseError<'i, ValueParseErrorKind<'i>>;
+size_of_test!(ValueParseError, 48);
 
 #[derive(Clone, Debug, PartialEq)]
 /// Errors that can be encountered while parsing CSS values.
@@ -112,6 +111,8 @@ pub enum StyleParseErrorKind<'i> {
     RangedExpressionWithNoValue,
     /// A function was encountered that was not expected.
     UnexpectedFunction(CowRcStr<'i>),
+    /// Error encountered parsing a @property's `syntax` descriptor
+    PropertySyntaxField(PropertySyntaxParseError),
     /// @namespace must be before any rule but @charset and @import
     UnexpectedNamespaceRule,
     /// @import must be before any rule but @charset
@@ -120,8 +121,8 @@ pub enum StyleParseErrorKind<'i> {
     DisallowedImportRule,
     /// Unexpected @charset rule encountered.
     UnexpectedCharsetRule,
-    /// Unsupported @ rule
-    UnsupportedAtRule(CowRcStr<'i>),
+    /// The @property `<custom-property-name>` must start with `--`
+    UnexpectedIdent(CowRcStr<'i>),
     /// A placeholder for many sources of errors that require more specific variants.
     UnspecifiedError,
     /// An unexpected token was found within a namespace rule.
@@ -148,6 +149,7 @@ pub enum StyleParseErrorKind<'i> {
     /// The property is not allowed within a page rule.
     NotAllowedInPageRule,
 }
+size_of_test!(StyleParseErrorKind, 56);
 
 impl<'i> From<ValueParseErrorKind<'i>> for StyleParseErrorKind<'i> {
     fn from(this: ValueParseErrorKind<'i>) -> Self {
@@ -169,6 +171,7 @@ pub enum ValueParseErrorKind<'i> {
     /// An invalid filter value was encountered.
     InvalidFilter(Token<'i>),
 }
+size_of_test!(ValueParseErrorKind, 40);
 
 impl<'i> StyleParseErrorKind<'i> {
     /// Create an InvalidValue parse error
@@ -193,6 +196,31 @@ impl<'i> StyleParseErrorKind<'i> {
             location: value_error.location,
         }
     }
+}
+
+/// Errors that can be encountered while parsing the @property rule's syntax descriptor.
+#[derive(Clone, Debug, PartialEq)]
+pub enum PropertySyntaxParseError {
+    /// The string's length was 0.
+    EmptyInput,
+    /// A non-whitespace, non-pipe character was fount after parsing a component.
+    ExpectedPipeBetweenComponents,
+    /// The start of an identifier was expected but not found.
+    ///
+    /// <https://drafts.csswg.org/css-syntax-3/#name-start-code-point>
+    InvalidNameStart,
+    /// The name is not a valid `<ident>`.
+    InvalidName,
+    /// The data type name was not closed.
+    ///
+    /// <https://drafts.css-houdini.org/css-properties-values-api-1/#consume-data-type-name>
+    UnclosedDataTypeName,
+    /// The next byte was expected while parsing, but EOF was found instead.
+    UnexpectedEOF,
+    /// The data type is not a supported syntax component name.
+    ///
+    /// <https://drafts.css-houdini.org/css-properties-values-api-1/#supported-names>
+    UnknownDataTypeName,
 }
 
 bitflags! {

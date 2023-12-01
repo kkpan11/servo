@@ -11,6 +11,25 @@
 //! native Promise values that refer to the same JS value yet are distinct native objects
 //! (ie. address equality for the native objects is meaningless).
 
+use std::ptr;
+use std::rc::Rc;
+
+use dom_struct::dom_struct;
+use js::conversions::ToJSValConvertible;
+use js::jsapi::{
+    AddRawValueRoot, CallArgs, GetFunctionNativeReserved, Heap, JSAutoRealm, JSContext, JSObject,
+    JS_ClearPendingException, JS_GetFunctionObject, JS_NewFunction, NewFunctionWithReserved,
+    PromiseState, PromiseUserInputEventHandlingState, RemoveRawValueRoot,
+    SetFunctionNativeReserved,
+};
+use js::jsval::{Int32Value, JSVal, ObjectValue, UndefinedValue};
+use js::rust::wrappers::{
+    AddPromiseReactions, CallOriginalPromiseReject, CallOriginalPromiseResolve, GetPromiseState,
+    IsPromiseObject, NewPromiseObject, RejectPromise, ResolvePromise,
+    SetPromiseUserInputEventHandlingState,
+};
+use js::rust::{HandleObject, HandleValue, MutableHandleObject, Runtime};
+
 use crate::dom::bindings::conversions::root_from_object;
 use crate::dom::bindings::error::{Error, Fallible};
 use crate::dom::bindings::reflector::{DomObject, MutDomObject, Reflector};
@@ -21,26 +40,9 @@ use crate::dom::promisenativehandler::PromiseNativeHandler;
 use crate::realms::{enter_realm, AlreadyInRealm, InRealm};
 use crate::script_runtime::JSContext as SafeJSContext;
 use crate::script_thread::ScriptThread;
-use dom_struct::dom_struct;
-use js::conversions::ToJSValConvertible;
-use js::jsapi::{AddRawValueRoot, CallArgs, GetFunctionNativeReserved};
-use js::jsapi::{Heap, JS_ClearPendingException};
-use js::jsapi::{JSAutoRealm, JSContext, JSObject, JS_GetFunctionObject};
-use js::jsapi::{JS_NewFunction, NewFunctionWithReserved};
-use js::jsapi::{PromiseState, PromiseUserInputEventHandlingState};
-use js::jsapi::{RemoveRawValueRoot, SetFunctionNativeReserved};
-use js::jsval::{Int32Value, JSVal, ObjectValue, UndefinedValue};
-use js::rust::wrappers::{
-    AddPromiseReactions, CallOriginalPromiseReject, CallOriginalPromiseResolve,
-};
-use js::rust::wrappers::{GetPromiseState, IsPromiseObject, NewPromiseObject, RejectPromise};
-use js::rust::wrappers::{ResolvePromise, SetPromiseUserInputEventHandlingState};
-use js::rust::{HandleObject, HandleValue, MutableHandleObject, Runtime};
-use std::ptr;
-use std::rc::Rc;
 
 #[dom_struct]
-#[unrooted_must_root_lint::allow_unrooted_in_rc]
+#[crown::unrooted_must_root_lint::allow_unrooted_in_rc]
 pub struct Promise {
     reflector: Reflector,
     /// Since Promise values are natively reference counted without the knowledge of
@@ -104,7 +106,7 @@ impl Promise {
         Promise::new_with_js_promise(self.reflector().get_jsobject(), cx)
     }
 
-    #[allow(unsafe_code, unrooted_must_root)]
+    #[allow(unsafe_code, crown::unrooted_must_root)]
     pub fn new_with_js_promise(obj: HandleObject, cx: SafeJSContext) -> Rc<Promise> {
         unsafe {
             assert!(IsPromiseObject(obj));
@@ -143,7 +145,7 @@ impl Promise {
         }
     }
 
-    #[allow(unrooted_must_root, unsafe_code)]
+    #[allow(crown::unrooted_must_root, unsafe_code)]
     pub fn new_resolved(
         global: &GlobalScope,
         cx: SafeJSContext,
@@ -155,7 +157,7 @@ impl Promise {
         Ok(Promise::new_with_js_promise(p.handle(), cx))
     }
 
-    #[allow(unrooted_must_root, unsafe_code)]
+    #[allow(crown::unrooted_must_root, unsafe_code)]
     pub fn new_rejected(
         global: &GlobalScope,
         cx: SafeJSContext,
@@ -181,7 +183,7 @@ impl Promise {
         self.resolve(cx, v.handle());
     }
 
-    #[allow(unrooted_must_root, unsafe_code)]
+    #[allow(crown::unrooted_must_root, unsafe_code)]
     pub fn resolve(&self, cx: SafeJSContext, value: HandleValue) {
         unsafe {
             if !ResolvePromise(*cx, self.promise_obj(), value) {
@@ -215,7 +217,7 @@ impl Promise {
         self.reject(cx, v.handle());
     }
 
-    #[allow(unrooted_must_root, unsafe_code)]
+    #[allow(crown::unrooted_must_root, unsafe_code)]
     pub fn reject(&self, cx: SafeJSContext, value: HandleValue) {
         unsafe {
             if !RejectPromise(*cx, self.promise_obj(), value) {

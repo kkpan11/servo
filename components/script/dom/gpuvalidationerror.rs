@@ -2,13 +2,15 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
-use crate::dom::bindings::codegen::Bindings::GPUValidationErrorBinding::GPUValidationErrorMethods;
+use dom_struct::dom_struct;
+use js::rust::HandleObject;
+
+use super::bindings::error::Fallible;
+use crate::dom::bindings::codegen::Bindings::WebGPUBinding::GPUValidationErrorMethods;
 use crate::dom::bindings::reflector::{reflect_dom_object_with_proto, Reflector};
 use crate::dom::bindings::root::DomRoot;
 use crate::dom::bindings::str::DOMString;
 use crate::dom::globalscope::GlobalScope;
-use dom_struct::dom_struct;
-use js::rust::HandleObject;
 
 #[dom_struct]
 pub struct GPUValidationError {
@@ -46,8 +48,8 @@ impl GPUValidationError {
         global: &GlobalScope,
         proto: Option<HandleObject>,
         message: DOMString,
-    ) -> DomRoot<Self> {
-        GPUValidationError::new_with_proto(global, proto, message)
+    ) -> Fallible<DomRoot<Self>> {
+        Ok(GPUValidationError::new_with_proto(global, proto, message))
     }
 }
 

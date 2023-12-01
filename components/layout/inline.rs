@@ -2,35 +2,21 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
-use crate::block::AbsoluteAssignBSizesTraversal;
-use crate::context::{LayoutContext, LayoutFontContext};
-use crate::display_list::items::{DisplayListSection, OpaqueNode};
-use crate::display_list::{
-    BorderPaintingMode, DisplayListBuildState, StackingContextCollectionState,
-};
-use crate::floats::{FloatKind, Floats, PlacementInfo};
-use crate::flow::{BaseFlow, Flow, FlowClass, ForceNonfloatedFlag};
-use crate::flow::{EarlyAbsolutePositionInfo, FlowFlags, GetBaseFlow, OpaqueFlow};
-use crate::flow_ref::FlowRef;
-use crate::fragment::FragmentFlags;
-use crate::fragment::SpecificFragmentInfo;
-use crate::fragment::{CoordinateSystem, Fragment, FragmentBorderBoxIterator, Overflow};
-use crate::layout_debug;
-use crate::model::IntrinsicISizesContribution;
-use crate::text;
-use crate::traversal::PreorderFlowTraversal;
-use crate::ServoArc;
-use app_units::{Au, MIN_AU};
-use euclid::default::{Point2D, Rect, Size2D};
-use gfx::font::FontMetrics;
-use gfx_traits::print_tree::PrintTree;
-use range::{Range, RangeIndex};
-use script_layout_interface::wrapper_traits::PseudoElementType;
-use servo_geometry::MaxRect;
 use std::cmp::max;
 use std::collections::VecDeque;
 use std::sync::Arc;
 use std::{fmt, i32, isize, mem};
+
+use app_units::{Au, MIN_AU};
+use bitflags::bitflags;
+use euclid::default::{Point2D, Rect, Size2D};
+use gfx::font::FontMetrics;
+use gfx_traits::print_tree::PrintTree;
+use log::debug;
+use range::{int_range_index, Range, RangeIndex};
+use script_layout_interface::wrapper_traits::PseudoElementType;
+use serde::Serialize;
+use servo_geometry::MaxRect;
 use style::computed_values::display::T as Display;
 use style::computed_values::overflow_x::T as StyleOverflow;
 use style::computed_values::position::T as Position;
@@ -44,6 +30,26 @@ use style::values::computed::box_::VerticalAlign;
 use style::values::generics::box_::VerticalAlignKeyword;
 use style::values::specified::text::TextOverflowSide;
 use unicode_bidi as bidi;
+
+use crate::block::AbsoluteAssignBSizesTraversal;
+use crate::context::{LayoutContext, LayoutFontContext};
+use crate::display_list::items::{DisplayListSection, OpaqueNode};
+use crate::display_list::{
+    BorderPaintingMode, DisplayListBuildState, StackingContextCollectionState,
+};
+use crate::floats::{FloatKind, Floats, PlacementInfo};
+use crate::flow::{
+    BaseFlow, EarlyAbsolutePositionInfo, Flow, FlowClass, FlowFlags, ForceNonfloatedFlag,
+    GetBaseFlow, OpaqueFlow,
+};
+use crate::flow_ref::FlowRef;
+use crate::fragment::{
+    CoordinateSystem, Fragment, FragmentBorderBoxIterator, FragmentFlags, Overflow,
+    SpecificFragmentInfo,
+};
+use crate::model::IntrinsicISizesContribution;
+use crate::traversal::PreorderFlowTraversal;
+use crate::{layout_debug, layout_debug_scope, text, ServoArc};
 
 /// `Line`s are represented as offsets into the child list, rather than
 /// as an object that "owns" fragments. Choosing a different set of line
@@ -221,7 +227,7 @@ impl Line {
 
 int_range_index! {
     #[derive(Serialize)]
-    #[doc = "The index of a fragment in a flattened vector of DOM elements."]
+    /// The index of a fragment in a flattened vector of DOM elements.
     struct FragmentIndex(isize)
 }
 
@@ -1658,7 +1664,7 @@ impl Flow for InlineFlow {
             InlineFlow::set_inline_fragment_positions(
                 &mut self.fragments,
                 line,
-                self.base.flags.text_align(),
+                self.base.text_align,
                 indentation,
                 line_index + 1 == line_count,
             );
@@ -1754,7 +1760,10 @@ impl Flow for InlineFlow {
                         first_fragment.style.logical_border_width())
                     .start;
                     containing_block_positions.push(
-                        padding_box_origin.to_physical(self.base.writing_mode, container_size),
+                        // TODO(servo#30577) revert once underlying bug is fixed
+                        // padding_box_origin.to_physical(self.base.writing_mode, container_size),
+                        padding_box_origin
+                            .to_physical_or_warn(self.base.writing_mode, container_size),
                     );
                 },
                 SpecificFragmentInfo::InlineBlock(_) if fragment.is_positioned() => {
@@ -1873,7 +1882,7 @@ impl Flow for InlineFlow {
         for fragment in self.fragments.fragments.iter_mut() {
             // If a particular fragment would establish a stacking context but has a transform
             // applied that causes it to take up no space, we can skip it entirely.
-            if fragment.has_non_invertible_transform() {
+            if fragment.has_non_invertible_transform_or_zero_scale() {
                 continue;
             }
             state.containing_block_clipping_and_scrolling = previous_cb_clipping_and_scrolling;
@@ -2053,6 +2062,7 @@ pub struct InlineFragmentNodeInfo {
 }
 
 bitflags! {
+    #[derive(Clone)]
     pub struct InlineFragmentNodeFlags: u8 {
         const FIRST_FRAGMENT_OF_ELEMENT = 0x01;
         const LAST_FRAGMENT_OF_ELEMENT = 0x02;

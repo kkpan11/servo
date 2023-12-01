@@ -2,16 +2,18 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
-use crate::replaced::IntrinsicSizes;
 use euclid::{Size2D, Vector2D};
 use style::computed_values::background_clip::single_value::T as Clip;
 use style::computed_values::background_origin::single_value::T as Origin;
 use style::properties::ComputedValues;
 use style::values::computed::background::BackgroundSize as Size;
 use style::values::computed::{Length, LengthPercentage};
-use style::values::specified::background::BackgroundRepeat as RepeatXY;
-use style::values::specified::background::BackgroundRepeatKeyword as Repeat;
+use style::values::specified::background::{
+    BackgroundRepeat as RepeatXY, BackgroundRepeatKeyword as Repeat,
+};
 use webrender_api::{self as wr, units};
+
+use crate::replaced::IntrinsicSizes;
 
 pub(super) struct BackgroundLayer {
     pub common: wr::CommonItemProperties,
@@ -64,8 +66,8 @@ pub(super) fn painting_area<'a>(
     };
     // The 'backgound-clip' property maps directly to `clip_rect` in `CommonItemProperties`:
     let mut common = builder.common_properties(*painting_area, &fb.fragment.style);
-    if let Some(clip_id) = clip {
-        common.clip_id = clip_id
+    if let Some(clip_chain_id) = clip {
+        common.clip_id = wr::ClipId::ClipChain(clip_chain_id)
     }
     (painting_area, common)
 }

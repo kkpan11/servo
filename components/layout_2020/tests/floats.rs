@@ -4,21 +4,20 @@
 
 //! Property-based randomized testing for the core float layout algorithm.
 
-#[macro_use]
-extern crate lazy_static;
-
-use euclid::num::Zero;
-use layout::flow::float::{ClearSide, FloatBand, FloatBandNode, FloatBandTree, FloatContext};
-use layout::flow::float::{ContainingBlockPositionInfo, FloatSide, PlacementInfo};
-use layout::geom::flow_relative::{Rect, Vec2};
-use quickcheck::{Arbitrary, Gen};
-use std::f32;
 use std::ops::Range;
 use std::panic::{self, PanicInfo};
 use std::sync::{Mutex, MutexGuard};
-use std::thread;
-use std::u32;
-use style::values::computed::Length;
+use std::{f32, thread, u32};
+
+use euclid::num::Zero;
+use layout_2020::flow::float::{
+    ContainingBlockPositionInfo, FloatBand, FloatBandNode, FloatBandTree, FloatContext, FloatSide,
+    PlacementInfo,
+};
+use layout_2020::geom::{LogicalRect, LogicalVec2};
+use lazy_static::lazy_static;
+use quickcheck::{Arbitrary, Gen};
+use style::values::computed::{Clear, Length};
 
 lazy_static! {
     static ref PANIC_HOOK_MUTEX: Mutex<()> = Mutex::new(());
@@ -314,7 +313,7 @@ fn test_tree_range_setting() {
 
         for range in ranges {
             let start = range.start_index.min(tops.len() as u32 - 1);
-            let end = (range.start_index + range.length).min(tops.len() as u32 - 1);
+            let end = (range.start_index as u64 + range.length as u64).min(tops.len() as u64 - 1);
             let block_range = tops[start as usize]..tops[end as usize];
             let length = Length::new(range.length as f32);
             let new_tree = tree.set_range(&block_range, range.side, length);
@@ -353,7 +352,7 @@ impl Arbitrary for FloatInput {
         let clear = u8::arbitrary(generator);
         FloatInput {
             info: PlacementInfo {
-                size: Vec2 {
+                size: LogicalVec2 {
                     inline: Length::new(width as f32),
                     block: Length::new(height as f32),
                 },
@@ -362,7 +361,7 @@ impl Arbitrary for FloatInput {
                 } else {
                     FloatSide::Right
                 },
-                clear: new_clear_side(clear),
+                clear: new_clear(clear),
             },
             ceiling,
             containing_block_info: ContainingBlockPositionInfo::new_with_inline_offsets(
@@ -383,8 +382,8 @@ impl Arbitrary for FloatInput {
             this.info.size.block = Length::new(block_size);
             shrunk = true;
         }
-        if let Some(clear_side) = (self.info.clear as u8).shrink().next() {
-            this.info.clear = new_clear_side(clear_side);
+        if let Some(clear) = (self.info.clear as u8).shrink().next() {
+            this.info.clear = new_clear(clear);
             shrunk = true;
         }
         if let Some(left) = self.containing_block_info.inline_start.px().shrink().next() {
@@ -407,12 +406,12 @@ impl Arbitrary for FloatInput {
     }
 }
 
-fn new_clear_side(value: u8) -> ClearSide {
+fn new_clear(value: u8) -> Clear {
     match value & 3 {
-        0 => ClearSide::None,
-        1 => ClearSide::Left,
-        2 => ClearSide::Right,
-        _ => ClearSide::Both,
+        0 => Clear::None,
+        1 => Clear::Left,
+        2 => Clear::Right,
+        _ => Clear::Both,
     }
 }
 
@@ -425,7 +424,7 @@ struct FloatPlacement {
 // Information about the placement of a float.
 #[derive(Clone)]
 struct PlacedFloat {
-    origin: Vec2<Length>,
+    origin: LogicalVec2<Length>,
     info: PlacementInfo,
     ceiling: Length,
     containing_block_info: ContainingBlockPositionInfo,
@@ -454,8 +453,8 @@ impl Drop for FloatPlacement {
 }
 
 impl PlacedFloat {
-    fn rect(&self) -> Rect<Length> {
-        Rect {
+    fn rect(&self) -> LogicalRect<Length> {
+        LogicalRect {
             start_corner: self.origin.clone(),
             size: self.info.size.clone(),
         }
@@ -468,7 +467,7 @@ impl FloatPlacement {
         let mut placed_floats = vec![];
         for float in floats {
             let ceiling = Length::new(float.ceiling as f32);
-            float_context.lower_ceiling(ceiling);
+            float_context.set_ceiling_from_non_floats(ceiling);
             float_context.containing_block_info = float.containing_block_info;
             placed_floats.push(PlacedFloat {
                 origin: float_context.add_float(&float.info),
@@ -707,7 +706,7 @@ fn check_floats_rule_10(placement: &FloatPlacement) {
     }
 
     for (this_float_index, this_float) in placement.placed_floats.iter().enumerate() {
-        if this_float.info.clear == ClearSide::None {
+        if this_float.info.clear == Clear::None {
             continue;
         }
 
@@ -731,10 +730,10 @@ fn check_floats_rule_10(placement: &FloatPlacement) {
             }
 
             match this_float.info.clear {
-                ClearSide::Left => assert_ne!(other_float.info.side, FloatSide::Left),
-                ClearSide::Right => assert_ne!(other_float.info.side, FloatSide::Right),
-                ClearSide::Both => assert!(false),
-                ClearSide::None => unreachable!(),
+                Clear::Left => assert_ne!(other_float.info.side, FloatSide::Left),
+                Clear::Right => assert_ne!(other_float.info.side, FloatSide::Right),
+                Clear::Both => assert!(false),
+                Clear::None => unreachable!(),
             }
         }
     }

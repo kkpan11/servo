@@ -2,12 +2,21 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
+use std::cell::Cell;
+use std::default::Default;
+
+use devtools_traits::{TimelineMarker, TimelineMarkerType};
+use dom_struct::dom_struct;
+use js::rust::HandleObject;
+use metrics::ToMs;
+use servo_atoms::Atom;
+
 use crate::dom::bindings::callback::ExceptionHandling;
 use crate::dom::bindings::cell::DomRefCell;
 use crate::dom::bindings::codegen::Bindings::EventBinding;
 use crate::dom::bindings::codegen::Bindings::EventBinding::{EventConstants, EventMethods};
 use crate::dom::bindings::codegen::Bindings::PerformanceBinding::DOMHighResTimeStamp;
-use crate::dom::bindings::codegen::Bindings::PerformanceBinding::PerformanceBinding::PerformanceMethods;
+use crate::dom::bindings::codegen::Bindings::PerformanceBinding::Performance_Binding::PerformanceMethods;
 use crate::dom::bindings::codegen::Bindings::WindowBinding::WindowMethods;
 use crate::dom::bindings::error::Fallible;
 use crate::dom::bindings::inheritance::Castable;
@@ -26,19 +35,13 @@ use crate::dom::performance::reduce_timing_resolution;
 use crate::dom::virtualmethods::vtable_for;
 use crate::dom::window::Window;
 use crate::task::TaskOnce;
-use devtools_traits::{TimelineMarker, TimelineMarkerType};
-use dom_struct::dom_struct;
-use js::rust::HandleObject;
-use metrics::ToMs;
-use servo_atoms::Atom;
-use std::cell::Cell;
-use std::default::Default;
 
 #[dom_struct]
 pub struct Event {
     reflector_: Reflector,
     current_target: MutNullableDom<EventTarget>,
     target: MutNullableDom<EventTarget>,
+    #[no_trace]
     type_: DomRefCell<Atom>,
     phase: Cell<EventPhase>,
     canceled: Cell<EventDefault>,
@@ -136,18 +139,6 @@ impl Event {
         *self.type_.borrow_mut() = type_;
         self.bubbles.set(bubbles);
         self.cancelable.set(cancelable);
-    }
-
-    // Determine if there are any listeners for a given target and type.
-    // See https://github.com/whatwg/dom/issues/453
-    pub fn has_listeners_for(&self, target: &EventTarget, type_: &Atom) -> bool {
-        // TODO: take 'removed' into account? Not implemented in Servo yet.
-        // https://dom.spec.whatwg.org/#event-listener-removed
-        let mut event_path = self.construct_event_path(&target);
-        event_path.push(DomRoot::from_ref(target));
-        event_path
-            .iter()
-            .any(|target| target.has_listeners_for(type_))
     }
 
     // https://dom.spec.whatwg.org/#event-path

@@ -2,7 +2,11 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
-use crate::dom::bindings::codegen::Bindings::EventBinding::EventBinding::EventMethods;
+use dom_struct::dom_struct;
+use js::rust::HandleObject;
+use servo_atoms::Atom;
+
+use crate::dom::bindings::codegen::Bindings::EventBinding::Event_Binding::EventMethods;
 use crate::dom::bindings::codegen::Bindings::XRInputSourceEventBinding::{
     self, XRInputSourceEventMethods,
 };
@@ -16,9 +20,6 @@ use crate::dom::globalscope::GlobalScope;
 use crate::dom::window::Window;
 use crate::dom::xrframe::XRFrame;
 use crate::dom::xrinputsource::XRInputSource;
-use dom_struct::dom_struct;
-use js::rust::HandleObject;
-use servo_atoms::Atom;
 
 #[dom_struct]
 pub struct XRInputSourceEvent {
@@ -28,7 +29,7 @@ pub struct XRInputSourceEvent {
 }
 
 impl XRInputSourceEvent {
-    #[allow(unrooted_must_root)]
+    #[allow(crown::unrooted_must_root)]
     fn new_inherited(frame: &XRFrame, source: &XRInputSource) -> XRInputSourceEvent {
         XRInputSourceEvent {
             event: Event::new_inherited(),

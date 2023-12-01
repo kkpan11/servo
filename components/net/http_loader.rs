@@ -2,32 +2,28 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
-use crate::connector::{create_http_client, ConnectionCerts, Connector, ExtraCerts, TlsConfig};
-use crate::cookie;
-use crate::cookie_storage::CookieStorage;
-use crate::decoder::Decoder;
-use crate::fetch::cors_cache::CorsCache;
-use crate::fetch::methods::{main_fetch, Data, DoneChannel, FetchContext, Target};
-use crate::hsts::HstsList;
-use crate::http_cache::{CacheKey, HttpCache};
-use crate::resource_thread::AuthCache;
-use async_recursion::async_recursion;
 use core::convert::Infallible;
+use std::collections::{HashMap, HashSet};
+use std::iter::FromIterator;
+use std::mem;
+use std::ops::Deref;
+use std::sync::{Arc as StdArc, Condvar, Mutex, RwLock};
+use std::time::{Duration, SystemTime};
+
+use async_recursion::async_recursion;
 use crossbeam_channel::Sender;
 use devtools_traits::{
     ChromeToDevtoolsControlMsg, DevtoolsControlMsg, HttpRequest as DevtoolsHttpRequest,
+    HttpResponse as DevtoolsHttpResponse, NetworkEvent,
 };
-use devtools_traits::{HttpResponse as DevtoolsHttpResponse, NetworkEvent};
 use futures::{future, StreamExt, TryFutureExt, TryStreamExt};
 use headers::authorization::Basic;
-use headers::{AccessControlAllowCredentials, AccessControlAllowHeaders, HeaderMapExt};
 use headers::{
-    AccessControlAllowMethods, AccessControlRequestHeaders, AccessControlRequestMethod,
-    Authorization,
+    AccessControlAllowCredentials, AccessControlAllowHeaders, AccessControlAllowMethods,
+    AccessControlAllowOrigin, AccessControlMaxAge, AccessControlRequestHeaders,
+    AccessControlRequestMethod, Authorization, CacheControl, ContentEncoding, ContentLength,
+    HeaderMapExt, IfModifiedSince, LastModified, Origin as HyperOrigin, Pragma, Referer, UserAgent,
 };
-use headers::{AccessControlAllowOrigin, AccessControlMaxAge};
-use headers::{CacheControl, ContentEncoding, ContentLength};
-use headers::{IfModifiedSince, LastModified, Origin as HyperOrigin, Pragma, Referer, UserAgent};
 use http::header::{
     self, HeaderValue, ACCEPT, CONTENT_ENCODING, CONTENT_LANGUAGE, CONTENT_LOCATION, CONTENT_TYPE,
 };
@@ -37,33 +33,25 @@ use hyper::{Body, Client, Response as HyperResponse};
 use hyper_serde::Serde;
 use ipc_channel::ipc::{self, IpcSender};
 use ipc_channel::router::ROUTER;
+use lazy_static::lazy_static;
+use log::{debug, error, info, log_enabled, warn};
 use msg::constellation_msg::{HistoryStateId, PipelineId};
 use net_traits::pub_domains::reg_suffix;
 use net_traits::quality::{quality_to_value, Quality, QualityItem};
 use net_traits::request::Origin::Origin as SpecificOrigin;
 use net_traits::request::{
     get_cors_unsafe_header_names, is_cors_non_wildcard_request_header_name,
-    is_cors_safelisted_method, is_cors_safelisted_request_header,
+    is_cors_safelisted_method, is_cors_safelisted_request_header, BodyChunkRequest,
+    BodyChunkResponse, CacheMode, CredentialsMode, Destination, Origin, RedirectMode, Referrer,
+    Request, RequestBuilder, RequestMode, ResponseTainting, ServiceWorkersMode,
 };
-use net_traits::request::{
-    BodyChunkRequest, BodyChunkResponse, RedirectMode, Referrer, Request, RequestBuilder,
-    RequestMode,
-};
-use net_traits::request::{CacheMode, CredentialsMode, Destination, Origin};
-use net_traits::request::{ResponseTainting, ServiceWorkersMode};
 use net_traits::response::{HttpsState, Response, ResponseBody, ResponseType};
-use net_traits::{CookieSource, FetchMetadata, NetworkError, ReferrerPolicy};
 use net_traits::{
-    RedirectEndValue, RedirectStartValue, ResourceAttribute, ResourceFetchTiming, ResourceTimeValue,
+    CookieSource, FetchMetadata, NetworkError, RedirectEndValue, RedirectStartValue,
+    ReferrerPolicy, ResourceAttribute, ResourceFetchTiming, ResourceTimeValue,
 };
 use servo_arc::Arc;
 use servo_url::{ImmutableOrigin, ServoUrl};
-use std::collections::{HashMap, HashSet};
-use std::iter::FromIterator;
-use std::mem;
-use std::ops::Deref;
-use std::sync::{Arc as StdArc, Condvar, Mutex, RwLock};
-use std::time::{Duration, SystemTime};
 use time::{self, Tm};
 use tokio::runtime::Runtime;
 use tokio::sync::mpsc::{
@@ -71,6 +59,19 @@ use tokio::sync::mpsc::{
     UnboundedReceiver, UnboundedSender,
 };
 use tokio_stream::wrappers::ReceiverStream;
+
+use crate::connector::{
+    create_http_client, create_tls_config, CACertificates, CertificateErrorOverrideManager,
+    Connector,
+};
+use crate::cookie;
+use crate::cookie_storage::CookieStorage;
+use crate::decoder::Decoder;
+use crate::fetch::cors_cache::CorsCache;
+use crate::fetch::methods::{main_fetch, Data, DoneChannel, FetchContext, Target};
+use crate::hsts::HstsList;
+use crate::http_cache::{CacheKey, HttpCache};
+use crate::resource_thread::AuthCache;
 
 lazy_static! {
     pub static ref HANDLE: Mutex<Option<Runtime>> = Mutex::new(Some(Runtime::new().unwrap()));
@@ -98,12 +99,12 @@ pub struct HttpState {
     pub auth_cache: RwLock<AuthCache>,
     pub history_states: RwLock<HashMap<HistoryStateId, Vec<u8>>>,
     pub client: Client<Connector, Body>,
-    pub extra_certs: ExtraCerts,
-    pub connection_certs: ConnectionCerts,
+    pub override_manager: CertificateErrorOverrideManager,
 }
 
 impl HttpState {
-    pub fn new(tls_config: TlsConfig) -> HttpState {
+    pub fn new() -> HttpState {
+        let override_manager = CertificateErrorOverrideManager::new();
         HttpState {
             hsts_list: RwLock::new(HstsList::new()),
             cookie_jar: RwLock::new(CookieStorage::new(150)),
@@ -111,9 +112,12 @@ impl HttpState {
             history_states: RwLock::new(HashMap::new()),
             http_cache: RwLock::new(HttpCache::new()),
             http_cache_state: Mutex::new(HashMap::new()),
-            client: create_http_client(tls_config),
-            extra_certs: ExtraCerts::new(),
-            connection_certs: ConnectionCerts::new(),
+            client: create_http_client(create_tls_config(
+                CACertificates::Default,
+                false, /* ignore_certificate_errors */
+                override_manager.clone(),
+            )),
+            override_manager,
         }
     }
 }
@@ -652,18 +656,12 @@ async fn obtain_response(
         let send_start = precise_time_ms();
 
         let host = request.uri().host().unwrap_or("").to_owned();
-        let host_clone = request.uri().host().unwrap_or("").to_owned();
-        let connection_certs = context.state.connection_certs.clone();
-        let connection_certs_clone = context.state.connection_certs.clone();
-
+        let override_manager = context.state.override_manager.clone();
         let headers = headers.clone();
 
         client
             .request(request)
             .and_then(move |res| {
-                // We no longer need to track the cert for this connection.
-                connection_certs.remove(host);
-
                 let send_end = precise_time_ms();
 
                 // TODO(#21271) response_start: immediately after receiving first byte of response
@@ -696,8 +694,11 @@ async fn obtain_response(
                 };
                 future::ready(Ok((Decoder::detect(res), msg)))
             })
-            .map_err(move |e| {
-                NetworkError::from_hyper_error(&e, connection_certs_clone.remove(host_clone))
+            .map_err(move |error| {
+                NetworkError::from_hyper_error(
+                    &error,
+                    override_manager.remove_certificate_failing_verification(host.as_str()),
+                )
             })
             .await
     }

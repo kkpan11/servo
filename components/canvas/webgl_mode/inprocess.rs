@@ -2,27 +2,26 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
-use crate::webgl_thread::{WebGLThread, WebGLThreadInit, WebXRBridgeInit};
-use canvas_traits::webgl::webgl_channel;
-use canvas_traits::webgl::{WebGLContextId, WebGLMsg, WebGLThreads};
-use euclid::default::Size2D;
-use fnv::FnvHashMap;
-use sparkle::gl::GlType;
 use std::default::Default;
 use std::sync::{Arc, Mutex};
-use surfman::Device;
-use surfman::SurfaceInfo;
-use surfman::SurfaceTexture;
-use surfman_chains::SwapChains;
-use surfman_chains_api::SwapChainAPI;
-use surfman_chains_api::SwapChainsAPI;
-use webrender_api::{DocumentId, RenderApiSender};
+
+use canvas_traits::webgl::{webgl_channel, WebGLContextId, WebGLMsg, WebGLThreads};
+use euclid::default::Size2D;
+use fnv::FnvHashMap;
+use log::debug;
+use sparkle::gl::GlType;
+use surfman::chains::{SwapChainAPI, SwapChains, SwapChainsAPI};
+use surfman::{Device, SurfaceInfo, SurfaceTexture};
+use webrender::RenderApiSender;
+use webrender_api::DocumentId;
 use webrender_surfman::WebrenderSurfman;
 use webrender_traits::{
     WebrenderExternalImageApi, WebrenderExternalImageRegistry, WebrenderImageSource,
 };
 use webxr::SurfmanGL as WebXRSurfman;
 use webxr_api::LayerGrandManager as WebXRLayerGrandManager;
+
+use crate::webgl_thread::{WebGLThread, WebGLThreadInit, WebXRBridgeInit};
 
 pub struct WebGLComm {
     pub webgl_threads: WebGLThreads,

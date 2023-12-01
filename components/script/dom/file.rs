@@ -2,6 +2,11 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
+use dom_struct::dom_struct;
+use js::rust::HandleObject;
+use net_traits::filemanager_thread::SelectedFile;
+use script_traits::serializable::BlobImpl;
+
 use crate::dom::bindings::codegen::Bindings::FileBinding;
 use crate::dom::bindings::codegen::Bindings::FileBinding::FileMethods;
 use crate::dom::bindings::codegen::UnionTypes::ArrayBufferOrArrayBufferViewOrBlobOrString;
@@ -13,10 +18,6 @@ use crate::dom::bindings::str::DOMString;
 use crate::dom::blob::{blob_parts_to_bytes, normalize_type_string, Blob};
 use crate::dom::globalscope::GlobalScope;
 use crate::dom::window::Window;
-use dom_struct::dom_struct;
-use js::rust::HandleObject;
-use net_traits::filemanager_thread::SelectedFile;
-use script_traits::serializable::BlobImpl;
 
 #[dom_struct]
 pub struct File {
@@ -26,7 +27,7 @@ pub struct File {
 }
 
 impl File {
-    #[allow(unrooted_must_root)]
+    #[allow(crown::unrooted_must_root)]
     fn new_inherited(blob_impl: &BlobImpl, name: DOMString, modified: Option<i64>) -> File {
         File {
             blob: Blob::new_inherited(blob_impl),
@@ -51,7 +52,7 @@ impl File {
         Self::new_with_proto(global, None, blob_impl, name, modified)
     }
 
-    #[allow(unrooted_must_root)]
+    #[allow(crown::unrooted_must_root)]
     fn new_with_proto(
         global: &GlobalScope,
         proto: Option<HandleObject>,

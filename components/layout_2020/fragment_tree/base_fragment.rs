@@ -2,11 +2,13 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
-use crate::layout_debug::DebugId;
 use bitflags::bitflags;
 use gfx_traits::{combine_id_with_fragment_type, FragmentType};
+use serde::Serialize;
 use style::dom::OpaqueNode;
 use style::selector_parser::PseudoElement;
+
+use crate::layout_debug::DebugId;
 
 /// This data structure stores fields that are common to all non-base
 /// Fragment types and should generally be the first member of all
@@ -72,10 +74,10 @@ impl From<BaseFragmentInfo> for BaseFragment {
 }
 
 bitflags! {
-    #[doc = "Flags used to track various information about a DOM node during layout."]
-    #[derive(Serialize)]
+    /// Flags used to track various information about a DOM node during layout.
+    #[derive(Clone, Copy, Debug, Serialize)]
     pub(crate) struct FragmentFlags: u8 {
-        #[doc = "Whether or not this node is a body element on an HTML document."]
+        /// Whether or not this node is a body element on an HTML document.
         const IS_BODY_ELEMENT_OF_HTML_ELEMENT_ROOT = 0b00000001;
     }
 }

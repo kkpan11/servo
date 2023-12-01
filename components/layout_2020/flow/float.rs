@@ -6,25 +6,28 @@
 //!
 //! See CSS 2.1 § 9.5.1: https://www.w3.org/TR/CSS2/visuren.html#float-position
 
+use std::collections::VecDeque;
+use std::fmt::{Debug, Formatter, Result as FmtResult};
+use std::ops::Range;
+use std::{f32, mem};
+
+use euclid::num::Zero;
+use serde::Serialize;
+use servo_arc::Arc;
+use style::computed_values::float::T as FloatProperty;
+use style::properties::ComputedValues;
+use style::values::computed::{CSSPixelLength, Clear, Length};
+use style::values::specified::text::TextDecorationLine;
+
 use crate::context::LayoutContext;
 use crate::dom::NodeExt;
 use crate::dom_traversal::{Contents, NodeAndStyleInfo};
 use crate::formatting_contexts::IndependentFormattingContext;
 use crate::fragment_tree::{BoxFragment, CollapsedBlockMargins, CollapsedMargin, FloatFragment};
-use crate::geom::flow_relative::{Rect, Vec2};
+use crate::geom::{LogicalRect, LogicalVec2};
 use crate::positioned::PositioningContext;
-use crate::style_ext::{ComputedValuesExt, DisplayInside};
+use crate::style_ext::{ComputedValuesExt, DisplayInside, PaddingBorderMargin};
 use crate::ContainingBlock;
-use euclid::num::Zero;
-use servo_arc::Arc;
-use std::fmt::{Debug, Formatter, Result as FmtResult};
-use std::ops::Range;
-use std::{f32, mem};
-use style::computed_values::clear::T as ClearProperty;
-use style::computed_values::float::T as FloatProperty;
-use style::properties::ComputedValues;
-use style::values::computed::{CSSPixelLength, Length};
-use style::values::specified::text::TextDecorationLine;
 
 /// A floating box.
 #[derive(Debug, Serialize)]
@@ -70,6 +73,229 @@ impl ContainingBlockPositionInfo {
     }
 }
 
+/// This data strucure is used to try to place non-floating content among float content.
+/// This is used primarily to place replaced content and independent formatting contexts
+/// next to floats, as the specifcation dictates.
+pub(crate) struct PlacementAmongFloats<'a> {
+    /// The [FloatContext] to use for this placement.
+    float_context: &'a FloatContext,
+    /// The current bands we are considering for this placement.
+    current_bands: VecDeque<FloatBand>,
+    /// The next band, needed to know the height of the last band in current_bands.
+    next_band: FloatBand,
+    /// The size of the object to place.
+    object_size: LogicalVec2<Length>,
+    /// The minimum position in the block direction for the placement. Objects should not
+    /// be placed before this point.
+    ceiling: Length,
+    /// The inline position where the object would be if there were no floats. The object
+    /// can be placed after it due to floats, but not before it.
+    min_inline_start: Length,
+    /// The maximum inline position that the object can attain when avoiding floats.
+    max_inline_end: Length,
+}
+
+impl<'a> PlacementAmongFloats<'a> {
+    pub(crate) fn new(
+        float_context: &'a FloatContext,
+        ceiling: Length,
+        object_size: LogicalVec2<Length>,
+        pbm: &PaddingBorderMargin,
+    ) -> Self {
+        assert!(!ceiling.px().is_infinite());
+        let mut current_band = float_context.bands.find(ceiling).unwrap();
+        current_band.top = ceiling;
+        let current_bands = VecDeque::from([current_band]);
+        let next_band = float_context.bands.find_next(ceiling).unwrap();
+        let min_inline_start = float_context.containing_block_info.inline_start +
+            pbm.margin.inline_start.auto_is(Length::zero);
+        let max_inline_end = (float_context.containing_block_info.inline_end -
+            pbm.margin.inline_end.auto_is(Length::zero))
+        .max(min_inline_start + object_size.inline);
+        PlacementAmongFloats {
+            float_context,
+            current_bands,
+            next_band,
+            object_size,
+            ceiling,
+            min_inline_start,
+            max_inline_end,
+        }
+    }
+
+    /// The top of the bands under consideration. This is initially the ceiling provided
+    /// during creation of this [`PlacementAmongFloats`], but may be larger if the top
+    /// band is discarded.
+    fn top_of_bands(&self) -> Option<Length> {
+        self.current_bands.front().map(|band| band.top)
+    }
+
+    /// The height of the bands under consideration.
+    fn current_bands_height(&self) -> Length {
+        if let Some(top) = self.top_of_bands() {
+            self.next_band.top - top
+        } else {
+            assert!(self.next_band.top.px().is_infinite());
+            self.next_band.top
+        }
+    }
+
+    /// Add a single band to the bands under consideration and calculate the new
+    /// [`PlacementAmongFloats::next_band`].
+    fn add_one_band(&mut self) {
+        assert!(!self.next_band.top.px().is_infinite());
+        self.current_bands.push_back(self.next_band);
+        self.next_band = self
+            .float_context
+            .bands
+            .find_next(self.next_band.top)
+            .unwrap();
+    }
+
+    /// Adds bands to the set of bands under consideration until their block size is at
+    /// least large enough to contain the block size of the object being placed.
+    fn accumulate_enough_bands_for_block_size(&mut self) {
+        while self.current_bands_height() < self.object_size.block {
+            self.add_one_band();
+        }
+    }
+
+    /// Find the start and end of the inline space provided by the current set of bands
+    /// under consideration.
+    fn calculate_inline_start_and_end(&self) -> (Length, Length) {
+        let mut max_inline_start = self.min_inline_start;
+        let mut min_inline_end = self.max_inline_end;
+        for band in self.current_bands.iter() {
+            if let Some(left) = band.left {
+                max_inline_start = max_inline_start.max(left);
+            }
+            if let Some(right) = band.right {
+                min_inline_end = min_inline_end.min(right);
+            }
+        }
+        return (max_inline_start, min_inline_end);
+    }
+
+    /// Find the total inline size provided by the current set of bands under consideration.
+    fn calculate_viable_inline_size(&self) -> Length {
+        let (inline_start, inline_end) = self.calculate_inline_start_and_end();
+        inline_end - inline_start
+    }
+
+    fn try_place_once(&mut self) -> Option<LogicalRect<Length>> {
+        assert!(!self.current_bands.is_empty());
+        self.accumulate_enough_bands_for_block_size();
+        let (inline_start, inline_end) = self.calculate_inline_start_and_end();
+        let available_inline_size = inline_end - inline_start;
+        if available_inline_size < self.object_size.inline {
+            return None;
+        }
+        let top = self.top_of_bands().unwrap();
+        Some(LogicalRect {
+            start_corner: LogicalVec2 {
+                inline: inline_start,
+                block: top,
+            },
+            size: LogicalVec2 {
+                inline: available_inline_size,
+                block: self.next_band.top - top,
+            },
+        })
+    }
+
+    /// Checks if we either have bands or we have gone past all of them.
+    /// This is an invariant that should hold, otherwise we are in a broken state.
+    fn has_bands_or_at_end(&self) -> bool {
+        !self.current_bands.is_empty() || self.next_band.top.px().is_infinite()
+    }
+
+    fn pop_front_band_ensuring_has_bands_or_at_end(&mut self) {
+        self.current_bands.pop_front();
+        if !self.has_bands_or_at_end() {
+            self.add_one_band();
+        }
+    }
+
+    /// Run the placement algorithm for this [PlacementAmongFloats].
+    pub(crate) fn place(&mut self) -> LogicalRect<Length> {
+        debug_assert!(self.has_bands_or_at_end());
+        while !self.current_bands.is_empty() {
+            if let Some(result) = self.try_place_once() {
+                return result;
+            }
+            self.pop_front_band_ensuring_has_bands_or_at_end();
+        }
+        debug_assert!(self.has_bands_or_at_end());
+
+        // We could not fit the object in among the floats, so we place it as if it
+        // cleared all floats.
+        LogicalRect {
+            start_corner: LogicalVec2 {
+                inline: self.min_inline_start,
+                block: self
+                    .ceiling
+                    .max(self.float_context.clear_left_position)
+                    .max(self.float_context.clear_right_position),
+            },
+            size: LogicalVec2 {
+                inline: self.max_inline_end - self.min_inline_start,
+                block: Length::new(f32::INFINITY),
+            },
+        }
+    }
+
+    /// After placing an object with `height: auto` (and using the minimum inline and
+    /// block size as the object size) and then laying it out, try to fit the object into
+    /// the current set of bands, given block size after layout and the available inline
+    /// space from the original placement. This will return true if the object fits at the
+    /// original placement location or false if the placement and layout must be run again
+    /// (with this [PlacementAmongFloats]).
+    pub(crate) fn try_to_expand_for_auto_block_size(
+        &mut self,
+        block_size_after_layout: Length,
+        size_from_placement: &LogicalVec2<Length>,
+    ) -> bool {
+        debug_assert!(self.has_bands_or_at_end());
+        debug_assert_eq!(size_from_placement.block, self.current_bands_height());
+        debug_assert_eq!(
+            size_from_placement.inline,
+            self.calculate_viable_inline_size()
+        );
+
+        // If the object after layout fits into the originally calculated placement, then
+        // it fits without any more work.
+        if block_size_after_layout <= size_from_placement.block {
+            return true;
+        }
+
+        // Keep searching until we have found an area with enough height
+        // to contain the block after layout.
+        let old_num_bands = self.current_bands.len();
+        assert!(old_num_bands > 0);
+        while self.current_bands_height() < block_size_after_layout {
+            self.add_one_band();
+
+            // If the new inline size is narrower, we must stop and run layout again.
+            // Normally, a narrower block size means a bigger height, but in some
+            // circumstances, such as when aspect ratio is used a narrower inline size
+            // can counter-interuitively lead to a smaller block size after layout!
+            let available_inline_size = self.calculate_viable_inline_size();
+            if available_inline_size < size_from_placement.inline {
+                // If the inline size becomes smaller than the minimum inline size, then
+                // the current set of bands will never work and we must try removing the
+                // first and searching starting from the second.
+                if available_inline_size < self.object_size.inline {
+                    self.next_band = self.current_bands[old_num_bands];
+                    self.current_bands.truncate(old_num_bands);
+                    self.pop_front_band_ensuring_has_bands_or_at_end();
+                }
+                return false;
+            }
+        }
+        true
+    }
+}
+
 /// Data kept during layout about the floats in a given block formatting context.
 ///
 /// This is a persistent data structure. Each float has its own private copy of the float context,
@@ -81,9 +307,13 @@ pub struct FloatContext {
     /// This tree is immutable; modification operations return the new tree, which may share nodes
     /// with previous versions of the tree.
     pub bands: FloatBandTree,
-    /// The current (logically) vertical position. No new floats may be placed (logically) above
-    /// this line.
-    pub ceiling: Length,
+    /// The block-direction "ceiling" defined by the placement of other floated content of
+    /// this FloatContext. No new floats can be placed at a lower block start than this value.
+    pub ceiling_from_floats: Length,
+    /// The block-direction "ceiling" defined by the placement of non-floated content that
+    /// precedes floated content in the document. Note that this may actually decrease as
+    /// content is laid out in the case that content overflows its container.
+    pub ceiling_from_non_floats: Length,
     /// Details about the position of the containing block relative to the
     /// independent block formatting context that contains all of the floats
     /// this `FloatContext` positions.
@@ -100,7 +330,7 @@ impl FloatContext {
     pub fn new(max_inline_size: Length) -> Self {
         let mut bands = FloatBandTree::new();
         bands = bands.insert(FloatBand {
-            top: Length::zero(),
+            top: Length::new(-f32::INFINITY),
             left: None,
             right: None,
         });
@@ -111,7 +341,8 @@ impl FloatContext {
         });
         FloatContext {
             bands,
-            ceiling: Length::zero(),
+            ceiling_from_floats: Length::zero(),
+            ceiling_from_non_floats: Length::zero(),
             containing_block_info: ContainingBlockPositionInfo::new_with_inline_offsets(
                 Length::zero(),
                 max_inline_size,
@@ -124,8 +355,14 @@ impl FloatContext {
     /// (Logically) lowers the ceiling to at least `new_ceiling` units.
     ///
     /// If the ceiling is already logically lower (i.e. larger) than this, does nothing.
-    pub fn lower_ceiling(&mut self, new_ceiling: Length) {
-        self.ceiling = self.ceiling.max(new_ceiling);
+    pub fn set_ceiling_from_non_floats(&mut self, new_ceiling: Length) {
+        self.ceiling_from_non_floats = new_ceiling;
+    }
+
+    /// The "ceiling" used for float placement. This is the minimum block position value
+    /// that should be used for placing any new float.
+    fn ceiling(&mut self) -> Length {
+        self.ceiling_from_floats.max(self.ceiling_from_non_floats)
     }
 
     /// Determines where a float with the given placement would go, but leaves the float context
@@ -133,13 +370,16 @@ impl FloatContext {
     ///
     /// This should be used for placing inline elements and block formatting contexts so that they
     /// don't collide with floats.
-    pub fn place_object(&self, object: &PlacementInfo) -> Vec2<Length> {
+    pub(crate) fn place_object(
+        &self,
+        object: &PlacementInfo,
+        ceiling: Length,
+    ) -> LogicalVec2<Length> {
         let ceiling = match object.clear {
-            ClearSide::None => self.ceiling,
-            ClearSide::Left => self.ceiling.max(self.clear_left_position),
-            ClearSide::Right => self.ceiling.max(self.clear_right_position),
-            ClearSide::Both => self
-                .ceiling
+            Clear::None => ceiling,
+            Clear::Left => ceiling.max(self.clear_left_position),
+            Clear::Right => ceiling.max(self.clear_right_position),
+            Clear::Both => ceiling
                 .max(self.clear_left_position)
                 .max(self.clear_right_position),
         };
@@ -161,9 +401,9 @@ impl FloatContext {
                     Some(band_left) => band_left.max(self.containing_block_info.inline_start),
                     None => self.containing_block_info.inline_start,
                 };
-                Vec2 {
+                LogicalVec2 {
                     inline: left_object_edge,
-                    block: first_band.top.max(self.ceiling),
+                    block: first_band.top.max(ceiling),
                 }
             },
             FloatSide::Right => {
@@ -171,30 +411,31 @@ impl FloatContext {
                     Some(band_right) => band_right.min(self.containing_block_info.inline_end),
                     None => self.containing_block_info.inline_end,
                 };
-                Vec2 {
+                LogicalVec2 {
                     inline: right_object_edge - object.size.inline,
-                    block: first_band.top.max(self.ceiling),
+                    block: first_band.top.max(ceiling),
                 }
             },
         }
     }
 
     /// Places a new float and adds it to the list. Returns the start corner of its margin box.
-    pub fn add_float(&mut self, new_float: &PlacementInfo) -> Vec2<Length> {
+    pub fn add_float(&mut self, new_float: &PlacementInfo) -> LogicalVec2<Length> {
         // Place the float.
-        let new_float_origin = self.place_object(&new_float);
+        let ceiling = self.ceiling();
+        let new_float_origin = self.place_object(&new_float, ceiling);
         let new_float_extent = match new_float.side {
             FloatSide::Left => new_float_origin.inline + new_float.size.inline,
             FloatSide::Right => new_float_origin.inline,
         };
 
-        let new_float_rect = Rect {
+        let new_float_rect = LogicalRect {
             start_corner: new_float_origin,
             // If this float has a negative margin, we should only consider its non-negative
             // block size contribution when determing where to place it. When the margin is
             // so negative that it's placed completely above the current float ceiling, then
             // we should position it as if it had zero block size.
-            size: Vec2 {
+            size: LogicalVec2 {
                 inline: new_float.size.inline.max(CSSPixelLength::zero()),
                 block: new_float.size.block.max(CSSPixelLength::zero()),
             },
@@ -235,7 +476,8 @@ impl FloatContext {
 
         // CSS 2.1 § 9.5.1 rule 6: The outer top of a floating box may not be higher than the outer
         // top of any block or floated box generated by an element earlier in the source document.
-        self.ceiling = self.ceiling.max(new_float_rect.start_corner.block);
+        self.ceiling_from_floats
+            .max_assign(new_float_rect.start_corner.block);
         new_float_rect.start_corner
     }
 }
@@ -244,11 +486,11 @@ impl FloatContext {
 #[derive(Clone, Debug)]
 pub struct PlacementInfo {
     /// The *margin* box size of the object.
-    pub size: Vec2<Length>,
+    pub size: LogicalVec2<Length>,
     /// Whether the object is (logically) aligned to the left or right.
     pub side: FloatSide,
     /// Which side or sides to clear floats on.
-    pub clear: ClearSide,
+    pub clear: Clear,
 }
 
 /// Whether the float is left or right.
@@ -258,17 +500,6 @@ pub struct PlacementInfo {
 pub enum FloatSide {
     Left,
     Right,
-}
-
-/// Which side or sides to clear floats on.
-///
-/// See CSS 2.1 § 9.5.2: https://www.w3.org/TR/CSS2/visuren.html#flow-control
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub enum ClearSide {
-    None = 0,
-    Left = 1,
-    Right = 2,
-    Both = 3,
 }
 
 /// Internal data structure that describes a nonoverlapping vertical region in which floats may be
@@ -295,17 +526,6 @@ impl FloatSide {
             FloatProperty::None => None,
             FloatProperty::Left => Some(FloatSide::Left),
             FloatProperty::Right => Some(FloatSide::Right),
-        }
-    }
-}
-
-impl ClearSide {
-    pub(crate) fn from_style(style: &ComputedValues) -> ClearSide {
-        match style.get_box().clear {
-            ClearProperty::None => ClearSide::None,
-            ClearProperty::Left => ClearSide::Left,
-            ClearProperty::Right => ClearSide::Right,
-            ClearProperty::Both => ClearSide::Both,
         }
     }
 }
@@ -706,7 +926,7 @@ impl FloatBox {
                             &mut positioning_context,
                             &containing_block_for_children,
                         );
-                        content_size = Vec2 {
+                        content_size = LogicalVec2 {
                             inline: inline_size,
                             block: box_size
                                 .block
@@ -729,8 +949,8 @@ impl FloatBox {
                     },
                 };
 
-                let content_rect = Rect {
-                    start_corner: Vec2::zero(),
+                let content_rect = LogicalRect {
+                    start_corner: LogicalVec2::zero(),
                     size: content_size,
                 };
 
@@ -787,12 +1007,16 @@ impl SequentialLayoutState {
         }
     }
 
-    /// Moves the current block position (logically) down by `block_distance`.
+    /// Moves the current block position (logically) down by `block_distance`. This may be
+    /// a negative advancement in the case that that block content overflows its
+    /// container, when the container is adjusting the block position of the
+    /// [`SequentialLayoutState`] after processing its overflowing content.
     ///
     /// Floats may not be placed higher than the current block position.
     pub(crate) fn advance_block_position(&mut self, block_distance: Length) {
         self.bfc_relative_block_position += block_distance;
-        self.floats.lower_ceiling(self.bfc_relative_block_position);
+        self.floats
+            .set_ceiling_from_non_floats(self.bfc_relative_block_position);
     }
 
     /// Replace the entire [ContainingBlockPositionInfo] data structure stored
@@ -821,6 +1045,60 @@ impl SequentialLayoutState {
         self.current_margin = CollapsedMargin::zero();
     }
 
+    /// Computes the position of the block-start border edge of an element
+    /// with the provided `block_start_margin`, assuming no clearance.
+    pub(crate) fn position_without_clearance(
+        &self,
+        block_start_margin: &CollapsedMargin,
+    ) -> Length {
+        // Adjoin `current_margin` and `block_start_margin` since there is no clearance.
+        self.bfc_relative_block_position + self.current_margin.adjoin(&block_start_margin).solve()
+    }
+
+    /// Computes the position of the block-start border edge of an element
+    /// with the provided `block_start_margin`, assuming a clearance of 0px.
+    pub(crate) fn position_with_zero_clearance(
+        &self,
+        block_start_margin: &CollapsedMargin,
+    ) -> Length {
+        // Clearance prevents `current_margin` and `block_start_margin` from being
+        // adjoining, so we need to solve them separately and then sum.
+        self.bfc_relative_block_position + self.current_margin.solve() + block_start_margin.solve()
+    }
+
+    /// Returns the block-end outer edge of the lowest float that is to be cleared (if any)
+    /// by an element with the provided `clear` and `block_start_margin`.
+    pub(crate) fn calculate_clear_position(
+        &self,
+        clear: Clear,
+        block_start_margin: &CollapsedMargin,
+    ) -> Option<Length> {
+        if clear == Clear::None {
+            return None;
+        }
+
+        // Calculate the hypothetical position where the element's top border edge
+        // would have been if the element's `clear` property had been `none`.
+        let hypothetical_block_position = self.position_without_clearance(&block_start_margin);
+
+        // Check if the hypothetical position is past the relevant floats,
+        // in that case we don't need to add clearance.
+        let clear_position = match clear {
+            Clear::None => unreachable!(),
+            Clear::Left => self.floats.clear_left_position,
+            Clear::Right => self.floats.clear_right_position,
+            Clear::Both => self
+                .floats
+                .clear_left_position
+                .max(self.floats.clear_right_position),
+        };
+        if hypothetical_block_position >= clear_position {
+            None
+        } else {
+            Some(clear_position)
+        }
+    }
+
     /// Returns the amount of clearance (if any) that a block with the given `clear` value
     /// needs to have at `current_block_position_including_margins()`.
     /// `block_start_margin` is the top margin of the block, after collapsing (if possible)
@@ -828,66 +1106,48 @@ impl SequentialLayoutState {
     /// since adding clearance will prevent `current_margin` and `block_start_margin`
     /// from collapsing together.
     ///
-    /// https://www.w3.org/TR/2011/REC-CSS2-20110607/visuren.html#flow-control
+    /// <https://www.w3.org/TR/2011/REC-CSS2-20110607/visuren.html#flow-control>
     pub(crate) fn calculate_clearance(
         &self,
-        clear_side: ClearSide,
+        clear: Clear,
         block_start_margin: &CollapsedMargin,
     ) -> Option<Length> {
-        if clear_side == ClearSide::None {
-            return None;
-        }
-
-        // Calculate the hypothetical position where the element's top border edge
-        // would have been if the element's `clear` property had been `none`.
-        let hypothetical_block_position = self.bfc_relative_block_position +
-            self.current_margin.adjoin(&block_start_margin).solve();
-
-        // Check if the hypothetical position is past the relevant floats,
-        // in that case we don't need to add clearance.
-        let clear_position = match clear_side {
-            ClearSide::None => unreachable!(),
-            ClearSide::Left => self.floats.clear_left_position,
-            ClearSide::Right => self.floats.clear_right_position,
-            ClearSide::Both => self
-                .floats
-                .clear_left_position
-                .max(self.floats.clear_right_position),
-        };
-        if hypothetical_block_position >= clear_position {
-            return None;
-        }
-
-        // We need to add clearance between `current_margin` and `block_start_margin`,
-        // this prevents them from collapsing.
-        // Compute the position of the element's top border edge if we added
-        // a clearance of 0px.
-        let position_with_zero_clearance = self.bfc_relative_block_position +
-            self.current_margin.solve() +
-            block_start_margin.solve();
-
-        // Set clearance to the amount necessary to place the border edge of the block
-        // even with the bottom outer edge of the lowest float that is to be cleared.
-        // Note that CSS2 also allows the alternative option of flooring this amount by
-        // `hypothetical_block_position - position_with_zero_clearance`,
-        // but other browser don't seem to do that.
-        Some(clear_position - position_with_zero_clearance)
+        return self
+            .calculate_clear_position(clear, &block_start_margin)
+            .map(|offset| offset - self.position_with_zero_clearance(&block_start_margin));
     }
 
-    /// Helper function that computes the clearance and adds `block_start_margin` accordingly.
-    /// If there is no clearance, `block_start_margin` can just be adjoined to `current_margin`.
-    /// But clearance prevents them from collapsing, so `collapse_margins()` is called.
-    pub(crate) fn calculate_clearance_and_adjoin_margin(
-        &mut self,
-        style: &Arc<ComputedValues>,
+    /// A block that is replaced or establishes an independent formatting context can't overlap floats,
+    /// it has to be placed next to them, and may get some clearance if there isn't enough space.
+    /// Given such a block with the provided 'clear', 'block_start_margin', 'pbm' and 'object_size',
+    /// this method finds an area that is big enough and doesn't overlap floats.
+    /// It returns a tuple with:
+    /// - The clearance amount (if any), which includes both the effect of 'clear'
+    ///   and the extra space to avoid floats.
+    /// - The LogicalRect in which the block can be placed without overlapping floats.
+    pub(crate) fn calculate_clearance_and_inline_adjustment(
+        &self,
+        clear: Clear,
         block_start_margin: &CollapsedMargin,
-    ) -> Option<Length> {
-        let clearance = self.calculate_clearance(ClearSide::from_style(style), &block_start_margin);
-        if clearance.is_some() {
-            self.collapse_margins();
-        }
-        self.adjoin_assign(&block_start_margin);
-        clearance
+        pbm: &PaddingBorderMargin,
+        object_size: LogicalVec2<Length>,
+    ) -> (Option<Length>, LogicalRect<Length>) {
+        // First compute the clear position required by the 'clear' property.
+        // The code below may then add extra clearance when the element can't fit
+        // next to floats not covered by 'clear'.
+        let clear_position = self.calculate_clear_position(clear, &block_start_margin);
+        let ceiling =
+            clear_position.unwrap_or_else(|| self.position_without_clearance(&block_start_margin));
+        let mut placement = PlacementAmongFloats::new(&self.floats, ceiling, object_size, pbm);
+        let placement_rect = placement.place();
+        let position = &placement_rect.start_corner;
+        let has_clearance = clear_position.is_some() || position.block > ceiling;
+        let clearance = if has_clearance {
+            Some(position.block - self.position_with_zero_clearance(&block_start_margin))
+        } else {
+            None
+        };
+        (clearance, placement_rect)
     }
 
     /// Adds a new adjoining margin.
@@ -909,7 +1169,7 @@ impl SequentialLayoutState {
         &mut self,
         box_fragment: &mut BoxFragment,
         margins_collapsing_with_parent_containing_block: CollapsedMargin,
-        block_offset_from_containining_block_top: CSSPixelLength,
+        block_offset_from_containing_block_top: Length,
     ) {
         let block_start_of_containing_block_in_bfc = self.floats.containing_block_info.block_start +
             self.floats
@@ -918,15 +1178,15 @@ impl SequentialLayoutState {
                 .adjoin(&margins_collapsing_with_parent_containing_block)
                 .solve();
 
-        self.floats.lower_ceiling(
-            block_start_of_containing_block_in_bfc + block_offset_from_containining_block_top,
+        self.floats.set_ceiling_from_non_floats(
+            block_start_of_containing_block_in_bfc + block_offset_from_containing_block_top,
         );
 
         let pbm_sums = &(&box_fragment.padding + &box_fragment.border) + &box_fragment.margin;
         let margin_box_start_corner = self.floats.add_float(&PlacementInfo {
             size: &box_fragment.content_rect.size + &pbm_sums.sum(),
             side: FloatSide::from_style(&box_fragment.style).expect("Float box wasn't floated!"),
-            clear: ClearSide::from_style(&box_fragment.style),
+            clear: box_fragment.style.get_box().clear,
         });
 
         // This is the position of the float in the float-containing block formatting context. We add the
@@ -935,7 +1195,7 @@ impl SequentialLayoutState {
             &box_fragment.content_rect.start_corner;
 
         // This is the position of the float relative to the containing block start.
-        let new_position_in_containing_block = Vec2 {
+        let new_position_in_containing_block = LogicalVec2 {
             inline: new_position_in_bfc.inline - self.floats.containing_block_info.inline_start,
             block: new_position_in_bfc.block - block_start_of_containing_block_in_bfc,
         };

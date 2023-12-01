@@ -15,6 +15,7 @@ crate-type = ["cdylib"]
 path = "lib.rs"
 
 [dependencies]
+cfg-if = { workspace = true }
 crossbeam-channel = { workspace = true }
 euclid = { workspace = true }
 glib = "0.9"
@@ -30,10 +31,7 @@ log = { workspace = true }
 servo-media = { git = "https://github.com/servo/media" }
 sparkle = { workspace = true }
 surfman = { workspace = true }
-surfman-chains = { workspace = true }
-surfman-chains-api = { workspace = true }
 webxr = { git = "https://github.com/servo/webxr", features = ["glwindow"] }
 
 [build-dependencies]
 gst-plugin-version-helper = "0.2"
-

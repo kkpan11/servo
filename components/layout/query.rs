@@ -4,35 +4,26 @@
 
 //! Utilities for querying the layout, as needed by the layout thread.
 
-use crate::construct::ConstructionResult;
-use crate::context::LayoutContext;
-use crate::display_list::items::{DisplayList, OpaqueNode, ScrollOffsetMap};
-use crate::display_list::IndexableText;
-use crate::flow::{Flow, GetBaseFlow};
-use crate::fragment::{Fragment, FragmentBorderBoxIterator, FragmentFlags, SpecificFragmentInfo};
-use crate::inline::InlineFragmentNodeFlags;
-use crate::sequential;
-use crate::wrapper::LayoutNodeLayoutData;
+use std::cmp::{max, min};
+use std::ops::Deref;
+use std::sync::{Arc, Mutex};
+
 use app_units::Au;
 use euclid::default::{Box2D, Point2D, Rect, Size2D, Vector2D};
 use euclid::Size2D as TypedSize2D;
 use ipc_channel::ipc::IpcSender;
 use msg::constellation_msg::PipelineId;
-use script_layout_interface::rpc::TextIndexResponse;
-use script_layout_interface::rpc::{ContentBoxResponse, ContentBoxesResponse, LayoutRPC};
-use script_layout_interface::rpc::{NodeGeometryResponse, NodeScrollIdResponse};
-use script_layout_interface::rpc::{OffsetParentResponse, ResolvedStyleResponse};
+use script_layout_interface::rpc::{
+    ContentBoxResponse, ContentBoxesResponse, LayoutRPC, NodeGeometryResponse,
+    NodeScrollIdResponse, OffsetParentResponse, ResolvedStyleResponse, TextIndexResponse,
+};
 use script_layout_interface::wrapper_traits::{
     LayoutNode, ThreadSafeLayoutElement, ThreadSafeLayoutNode,
 };
 use script_layout_interface::{LayoutElementType, LayoutNodeType};
-use script_traits::LayoutMsg as ConstellationMsg;
-use script_traits::UntrustedNodeAddress;
+use script_traits::{LayoutMsg as ConstellationMsg, UntrustedNodeAddress};
 use servo_arc::Arc as ServoArc;
 use servo_url::ServoUrl;
-use std::cmp::{max, min};
-use std::ops::Deref;
-use std::sync::{Arc, Mutex};
 use style::computed_values::display::T as Display;
 use style::computed_values::position::T as Position;
 use style::computed_values::visibility::T as Visibility;
@@ -49,6 +40,16 @@ use style::shared_lock::SharedRwLock;
 use style::stylesheets::{CssRuleType, Origin};
 use style_traits::{CSSPixel, ParsingMode, ToCss};
 use webrender_api::ExternalScrollId;
+
+use crate::construct::ConstructionResult;
+use crate::context::LayoutContext;
+use crate::display_list::items::{DisplayList, OpaqueNode, ScrollOffsetMap};
+use crate::display_list::IndexableText;
+use crate::flow::{Flow, GetBaseFlow};
+use crate::fragment::{Fragment, FragmentBorderBoxIterator, FragmentFlags, SpecificFragmentInfo};
+use crate::inline::InlineFragmentNodeFlags;
+use crate::sequential;
+use crate::wrapper::LayoutNodeLayoutData;
 
 /// Mutable data belonging to the LayoutThread.
 ///
@@ -75,7 +76,7 @@ pub struct LayoutThreadData {
     pub scroll_id_response: Option<ExternalScrollId>,
 
     /// A queued response for the scroll {top, left, width, height} of a node in pixels.
-    pub scroll_area_response: Rect<i32>,
+    pub scrolling_area_response: Rect<i32>,
 
     /// A queued response for the resolved style property of an element.
     pub resolved_style_response: String,
@@ -157,9 +158,9 @@ impl LayoutRPC for LayoutRPCImpl {
         }
     }
 
-    fn node_scroll_area(&self) -> NodeGeometryResponse {
+    fn scrolling_area(&self) -> NodeGeometryResponse {
         NodeGeometryResponse {
-            client_rect: self.0.lock().unwrap().scroll_area_response,
+            client_rect: self.0.lock().unwrap().scrolling_area_response,
         }
     }
 
@@ -476,14 +477,12 @@ impl FragmentBorderBoxIterator for FragmentClientRectQueryIterator {
             border_left_width: left_width,
             ..
         } = *fragment.style.get_border();
-        let (left_width, right_width) = (left_width.px(), right_width.px());
-        let (top_width, bottom_width) = (top_width.px(), bottom_width.px());
-        self.client_rect.origin.y = top_width as i32;
-        self.client_rect.origin.x = left_width as i32;
-        self.client_rect.size.width =
-            (border_box.size.width.to_f32_px() - left_width - right_width) as i32;
-        self.client_rect.size.height =
-            (border_box.size.height.to_f32_px() - top_width - bottom_width) as i32;
+        let (left_width, right_width) = (left_width.to_px(), right_width.to_px());
+        let (top_width, bottom_width) = (top_width.to_px(), bottom_width.to_px());
+        self.client_rect.origin.y = top_width;
+        self.client_rect.origin.x = left_width;
+        self.client_rect.size.width = border_box.size.width.to_px() - left_width - right_width;
+        self.client_rect.size.height = border_box.size.height.to_px() - top_width - bottom_width;
     }
 
     fn should_process(&mut self, fragment: &Fragment) -> bool {
@@ -506,11 +505,10 @@ impl FragmentBorderBoxIterator for UnioningFragmentScrollAreaIterator {
             border_left_width: left_border,
             ..
         } = *fragment.style.get_border();
-        let (left_border, right_border) = (left_border.px(), right_border.px());
-        let (top_border, bottom_border) = (top_border.px(), bottom_border.px());
-        let right_padding = (border_box.size.width.to_f32_px() - right_border - left_border) as i32;
-        let bottom_padding =
-            (border_box.size.height.to_f32_px() - bottom_border - top_border) as i32;
+        let (left_border, right_border) = (left_border.to_px(), right_border.to_px());
+        let (top_border, bottom_border) = (top_border.to_px(), bottom_border.to_px());
+        let right_padding = border_box.size.width.to_px() - right_border - left_border;
+        let bottom_padding = border_box.size.height.to_px() - bottom_border - top_border;
         let top_padding = top_border as i32;
         let left_padding = left_border as i32;
 
@@ -729,10 +727,21 @@ pub fn process_node_scroll_id_request<'dom>(
 }
 
 /// https://drafts.csswg.org/cssom-view/#scrolling-area
-pub fn process_node_scroll_area_request(
-    requested_node: OpaqueNode,
+pub fn process_scrolling_area_request(
+    requested_node: Option<OpaqueNode>,
     layout_root: &mut dyn Flow,
 ) -> Rect<i32> {
+    let requested_node = match requested_node {
+        Some(node) => node,
+        None => {
+            let rect = layout_root.base().overflow.scroll;
+            return Rect::new(
+                Point2D::new(rect.origin.x.to_nearest_px(), rect.origin.y.to_nearest_px()),
+                Size2D::new(rect.width().ceil_to_px(), rect.height().ceil_to_px()),
+            );
+        },
+    };
+
     let mut iterator = UnioningFragmentScrollAreaIterator::new(requested_node);
     sequential::iterate_through_flow_tree_fragment_border_boxes(layout_root, &mut iterator);
     match iterator.overflow_direction {
@@ -783,7 +792,7 @@ fn create_font_declaration(
     url_data: &ServoUrl,
     quirks_mode: QuirksMode,
 ) -> Option<PropertyDeclarationBlock> {
-    let mut declarations = SourcePropertyDeclaration::new();
+    let mut declarations = SourcePropertyDeclaration::default();
     let result = parse_one_declaration_into(
         &mut declarations,
         property.clone(),
@@ -860,7 +869,7 @@ where
                 shared: &context.style_context,
                 thread_local: &mut tlc,
             };
-            let styles = resolve_style(&mut context, element, RuleInclusion::All, None);
+            let styles = resolve_style(&mut context, element, RuleInclusion::All, None, None);
             styles.primary().clone()
         }
     } else {
@@ -916,7 +925,13 @@ pub fn process_resolved_style_request<'dom>(
         thread_local: &mut tlc,
     };
 
-    let styles = resolve_style(&mut context, element, RuleInclusion::All, pseudo.as_ref());
+    let styles = resolve_style(
+        &mut context,
+        element,
+        RuleInclusion::All,
+        pseudo.as_ref(),
+        None,
+    );
     let style = styles.primary();
     let longhand_id = match *property {
         PropertyId::LonghandAlias(id, _) | PropertyId::Longhand(id) => id,

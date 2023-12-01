@@ -2,6 +2,15 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
+use rayon::iter::IntoParallelRefMutIterator;
+use rayon::prelude::{IndexedParallelIterator, ParallelIterator};
+use serde::Serialize;
+use style::computed_values::position::T as Position;
+use style::properties::ComputedValues;
+use style::values::computed::{CSSPixelLength, Length};
+use style::values::specified::text::TextDecorationLine;
+use style::Zero;
+
 use crate::cell::ArcRefCell;
 use crate::context::LayoutContext;
 use crate::dom::NodeExt;
@@ -10,17 +19,9 @@ use crate::formatting_contexts::IndependentFormattingContext;
 use crate::fragment_tree::{
     AbsoluteBoxOffsets, BoxFragment, CollapsedBlockMargins, Fragment, HoistedSharedFragment,
 };
-use crate::geom::flow_relative::{Rect, Sides, Vec2};
-use crate::geom::{LengthOrAuto, LengthPercentageOrAuto};
+use crate::geom::{LengthOrAuto, LengthPercentageOrAuto, LogicalRect, LogicalSides, LogicalVec2};
 use crate::style_ext::{ComputedValuesExt, DisplayInside};
 use crate::{ContainingBlock, DefiniteContainingBlock};
-use rayon::iter::{IntoParallelRefMutIterator, ParallelExtend};
-use rayon_croissant::ParallelIteratorExt;
-use style::computed_values::position::T as Position;
-use style::properties::ComputedValues;
-use style::values::computed::{CSSPixelLength, Length};
-use style::values::specified::text::TextDecorationLine;
-use style::Zero;
 
 #[derive(Debug, Serialize)]
 pub(crate) struct AbsolutelyPositionedBox {
@@ -66,7 +67,7 @@ impl AbsolutelyPositionedBox {
 
     pub(crate) fn to_hoisted(
         self_: ArcRefCell<Self>,
-        initial_start_corner: Vec2<Length>,
+        initial_start_corner: LogicalVec2<Length>,
         containing_block: &ContainingBlock,
     ) -> HoistedAbsolutelyPositionedBox {
         fn absolute_box_offsets(
@@ -92,7 +93,7 @@ impl AbsolutelyPositionedBox {
         let box_offsets = {
             let box_ = self_.borrow();
             let box_offsets = box_.context.style().box_offsets(containing_block);
-            Vec2 {
+            LogicalVec2 {
                 inline: absolute_box_offsets(
                     initial_start_corner.inline,
                     box_offsets.inline_start,
@@ -158,13 +159,16 @@ impl PositioningContext {
     /// with the hoisted fragment so that it can be laid out properly at the containing
     /// block.
     ///
-    /// This function is used to update that static position at every level of the
-    /// fragment tree as the hoisted fragments move back up to their containing blocks.
-    /// Once an ancestor fragment is laid out, this function can be used to aggregate its
-    /// offset on the way back up.
+    /// This function is used to update the static position of hoisted boxes added after
+    /// the given index at every level of the fragment tree as the hoisted fragments move
+    /// up to their containing blocks. Once an ancestor fragment is laid out, this
+    /// function can be used to aggregate its offset to any descendent boxes that are
+    /// being hoisted. In this case, the appropriate index to use is the result of
+    /// [`PositioningContext::len()`] cached before laying out the [`Fragment`].
     pub(crate) fn adjust_static_position_of_hoisted_fragments(
         &mut self,
         parent_fragment: &Fragment,
+        index: PositioningContextLength,
     ) {
         let start_offset = match &parent_fragment {
             Fragment::Box(b) | Fragment::Float(b) => &b.content_rect.start_corner,
@@ -172,13 +176,14 @@ impl PositioningContext {
             Fragment::Anonymous(a) => &a.rect.start_corner,
             _ => unreachable!(),
         };
-        self.adjust_static_position_of_hoisted_fragments_with_offset(start_offset);
+        self.adjust_static_position_of_hoisted_fragments_with_offset(start_offset, index);
     }
 
     /// See documentation for [adjust_static_position_of_hoisted_fragments].
     pub(crate) fn adjust_static_position_of_hoisted_fragments_with_offset(
         &mut self,
-        start_offset: &Vec2<CSSPixelLength>,
+        start_offset: &LogicalVec2<CSSPixelLength>,
+        index: PositioningContextLength,
     ) {
         let update_fragment_if_needed = |hoisted_fragment: &mut HoistedAbsolutelyPositionedBox| {
             let mut fragment = hoisted_fragment.fragment.borrow_mut();
@@ -193,10 +198,14 @@ impl PositioningContext {
         self.for_nearest_positioned_ancestor
             .as_mut()
             .map(|hoisted_boxes| {
-                hoisted_boxes.iter_mut().for_each(update_fragment_if_needed);
+                hoisted_boxes
+                    .iter_mut()
+                    .skip(index.for_nearest_positioned_ancestor)
+                    .for_each(update_fragment_if_needed);
             });
         self.for_nearest_containing_block_for_all_descendants
             .iter_mut()
+            .skip(index.for_nearest_containing_block_for_all_descendants)
             .for_each(update_fragment_if_needed);
     }
 
@@ -221,11 +230,8 @@ impl PositioningContext {
         new_context.layout_collected_children(layout_context, &mut new_fragment);
 
         // If the new context has any hoisted boxes for the nearest containing block for
-        // all descendants than collect them and pass them up the tree.
-        vec_append_owned(
-            &mut self.for_nearest_containing_block_for_all_descendants,
-            new_context.for_nearest_containing_block_for_all_descendants,
-        );
+        // pass them up the tree.
+        self.append(new_context);
 
         if style.clone_position() == Position::Relative {
             new_fragment.content_rect.start_corner +=
@@ -242,10 +248,10 @@ impl PositioningContext {
         layout_context: &LayoutContext,
         new_fragment: &mut BoxFragment,
     ) {
-        let padding_rect = Rect {
+        let padding_rect = LogicalRect {
             size: new_fragment.content_rect.size.clone(),
             // Ignore the content rect’s position in its own containing block:
-            start_corner: Vec2::zero(),
+            start_corner: LogicalVec2::zero(),
         }
         .inflate(&new_fragment.padding);
         let containing_block = DefiniteContainingBlock {
@@ -297,16 +303,38 @@ impl PositioningContext {
             .push(box_)
     }
 
+    fn is_empty(&self) -> bool {
+        self.for_nearest_containing_block_for_all_descendants
+            .is_empty() &&
+            self.for_nearest_positioned_ancestor
+                .as_ref()
+                .map_or(true, |vector| vector.is_empty())
+    }
+
     pub(crate) fn append(&mut self, other: Self) {
+        if other.is_empty() {
+            return;
+        }
+
         vec_append_owned(
             &mut self.for_nearest_containing_block_for_all_descendants,
             other.for_nearest_containing_block_for_all_descendants,
         );
+
         match (
             self.for_nearest_positioned_ancestor.as_mut(),
             other.for_nearest_positioned_ancestor,
         ) {
-            (Some(a), Some(b)) => vec_append_owned(a, b),
+            (Some(us), Some(them)) => vec_append_owned(us, them),
+            (None, Some(them)) => {
+                // This is the case where we have laid out the absolute children in a containing
+                // block for absolutes and we then are passing up the fixed-position descendants
+                // to the containing block for all descendants.
+                vec_append_owned(
+                    &mut self.for_nearest_containing_block_for_all_descendants,
+                    them,
+                );
+            },
             (None, None) => {},
             _ => unreachable!(),
         }
@@ -343,6 +371,55 @@ impl PositioningContext {
             .as_mut()
             .map(|v| v.clear());
     }
+
+    /// Get the length of this [PositioningContext].
+    pub(crate) fn len(&self) -> PositioningContextLength {
+        PositioningContextLength {
+            for_nearest_positioned_ancestor: self
+                .for_nearest_positioned_ancestor
+                .as_ref()
+                .map_or(0, |vec| vec.len()),
+            for_nearest_containing_block_for_all_descendants: self
+                .for_nearest_containing_block_for_all_descendants
+                .len(),
+        }
+    }
+
+    /// Truncate this [PositioningContext] to the given [PositioningContextLength].  This
+    /// is useful for "unhoisting" boxes in this context and returning it to the state at
+    /// the time that [`len()`] was called.
+    pub(crate) fn truncate(&mut self, length: &PositioningContextLength) {
+        if let Some(vec) = self.for_nearest_positioned_ancestor.as_mut() {
+            vec.truncate(length.for_nearest_positioned_ancestor);
+        }
+        self.for_nearest_containing_block_for_all_descendants
+            .truncate(length.for_nearest_containing_block_for_all_descendants);
+    }
+}
+
+/// A data structure which stores the size of a positioning context.
+#[derive(PartialEq)]
+pub(crate) struct PositioningContextLength {
+    /// The number of boxes that will be hoisted the the nearest positioned ancestor for
+    /// layout.
+    for_nearest_positioned_ancestor: usize,
+    /// The number of boxes that will be hoisted the the nearest ancestor which
+    /// establishes a containing block for all descendants for layout.
+    for_nearest_containing_block_for_all_descendants: usize,
+}
+
+impl Zero for PositioningContextLength {
+    fn zero() -> Self {
+        PositioningContextLength {
+            for_nearest_positioned_ancestor: 0,
+            for_nearest_containing_block_for_all_descendants: 0,
+        }
+    }
+
+    fn is_zero(&self) -> bool {
+        self.for_nearest_positioned_ancestor == 0 &&
+            self.for_nearest_containing_block_for_all_descendants == 0
+    }
 }
 
 impl HoistedAbsolutelyPositionedBox {
@@ -354,21 +431,27 @@ impl HoistedAbsolutelyPositionedBox {
         containing_block: &DefiniteContainingBlock,
     ) {
         if layout_context.use_rayon {
-            fragments.par_extend(boxes.par_iter_mut().mapfold_reduce_into(
-                for_nearest_containing_block_for_all_descendants,
-                |for_nearest_containing_block_for_all_descendants, box_| {
-                    let new_fragment = ArcRefCell::new(Fragment::Box(box_.layout(
+            let mut new_fragments = Vec::new();
+            let mut new_hoisted_boxes = Vec::new();
+
+            boxes
+                .par_iter_mut()
+                .map(|hoisted_box| {
+                    let mut new_hoisted_boxes: Vec<HoistedAbsolutelyPositionedBox> = Vec::new();
+                    let new_fragment = ArcRefCell::new(Fragment::Box(hoisted_box.layout(
                         layout_context,
-                        for_nearest_containing_block_for_all_descendants,
+                        &mut new_hoisted_boxes,
                         containing_block,
                     )));
 
-                    box_.fragment.borrow_mut().fragment = Some(new_fragment.clone());
-                    new_fragment
-                },
-                Vec::new,
-                vec_append_owned,
-            ))
+                    hoisted_box.fragment.borrow_mut().fragment = Some(new_fragment.clone());
+                    (new_fragment, new_hoisted_boxes)
+                })
+                .unzip_into_vecs(&mut new_fragments, &mut new_hoisted_boxes);
+
+            fragments.extend(new_fragments);
+            for_nearest_containing_block_for_all_descendants
+                .extend(new_hoisted_boxes.into_iter().flatten());
         } else {
             fragments.extend(boxes.iter_mut().map(|box_| {
                 let new_fragment = ArcRefCell::new(Fragment::Box(box_.layout(
@@ -406,7 +489,7 @@ impl HoistedAbsolutelyPositionedBox {
                     None,
                     &pbm,
                 );
-                Vec2 {
+                LogicalVec2 {
                     inline: LengthOrAuto::LengthPercentage(used_size.inline),
                     block: LengthOrAuto::LengthPercentage(used_size.block),
                 }
@@ -434,7 +517,7 @@ impl HoistedAbsolutelyPositionedBox {
             avoid_negative_margin_start: false,
             box_offsets: &shared_fragment.box_offsets.block,
         };
-        let overconstrained = Vec2 {
+        let overconstrained = LogicalVec2 {
             inline: inline_axis_solver.is_overconstrained_for_size(computed_size.inline),
             block: block_axis_solver.is_overconstrained_for_size(computed_size.block),
         };
@@ -508,7 +591,7 @@ impl HoistedAbsolutelyPositionedBox {
                     }
 
                     struct Result {
-                        content_size: Vec2<CSSPixelLength>,
+                        content_size: LogicalVec2<CSSPixelLength>,
                         fragments: Vec<Fragment>,
                     }
 
@@ -541,7 +624,7 @@ impl HoistedAbsolutelyPositionedBox {
                         );
                         let block_size = size.auto_is(|| independent_layout.content_block_size);
                         Result {
-                            content_size: Vec2 {
+                            content_size: LogicalVec2 {
                                 inline: inline_size,
                                 block: block_size,
                             },
@@ -580,7 +663,7 @@ impl HoistedAbsolutelyPositionedBox {
                 },
             };
 
-            let margin = Sides {
+            let margin = LogicalSides {
                 inline_start: inline_axis.margin_start,
                 inline_end: inline_axis.margin_end,
                 block_start: block_axis.margin_start,
@@ -601,8 +684,8 @@ impl HoistedAbsolutelyPositionedBox {
                 },
             };
 
-            let content_rect = Rect {
-                start_corner: Vec2 {
+            let content_rect = LogicalRect {
+                start_corner: LogicalVec2 {
                     inline: inline_start,
                     block: block_start,
                 },
@@ -634,6 +717,7 @@ impl HoistedAbsolutelyPositionedBox {
         // adjust it to account for the start corner of this absolute.
         positioning_context.adjust_static_position_of_hoisted_fragments_with_offset(
             &new_fragment.content_rect.start_corner,
+            PositioningContextLength::zero(),
         );
 
         for_nearest_containing_block_for_all_descendants
@@ -775,7 +859,7 @@ fn vec_append_owned<T>(a: &mut Vec<T>, mut b: Vec<T>) {
 pub(crate) fn relative_adjustement(
     style: &ComputedValues,
     containing_block: &ContainingBlock,
-) -> Vec2<Length> {
+) -> LogicalVec2<Length> {
     // "If the height of the containing block is not specified explicitly (i.e.,
     // it depends on content height), and this element is not absolutely
     // positioned, the value computes to 'auto'.""
@@ -795,7 +879,7 @@ pub(crate) fn relative_adjustement(
             (LengthOrAuto::LengthPercentage(start), _) => start,
         }
     }
-    Vec2 {
+    LogicalVec2 {
         inline: adjust(box_offsets.inline_start, box_offsets.inline_end),
         block: adjust(box_offsets.block_start, box_offsets.block_end),
     }

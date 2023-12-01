@@ -4,7 +4,21 @@
 
 //! Base classes to work with IDL callbacks.
 
-use crate::dom::bindings::codegen::Bindings::WindowBinding::WindowBinding::WindowMethods;
+use std::default::Default;
+use std::ffi::CString;
+use std::mem::drop;
+use std::ops::Deref;
+use std::ptr;
+use std::rc::Rc;
+
+use js::jsapi::{
+    AddRawValueRoot, EnterRealm, Heap, IsCallable, JSObject, LeaveRealm, Realm, RemoveRawValueRoot,
+};
+use js::jsval::{JSVal, ObjectValue, UndefinedValue};
+use js::rust::wrappers::{JS_GetProperty, JS_WrapObject};
+use js::rust::{MutableHandleObject, Runtime};
+
+use crate::dom::bindings::codegen::Bindings::WindowBinding::Window_Binding::WindowMethods;
 use crate::dom::bindings::error::{report_pending_exception, Error, Fallible};
 use crate::dom::bindings::inheritance::Castable;
 use crate::dom::bindings::reflector::DomObject;
@@ -15,18 +29,6 @@ use crate::dom::globalscope::GlobalScope;
 use crate::dom::window::Window;
 use crate::realms::{enter_realm, InRealm};
 use crate::script_runtime::JSContext;
-use js::jsapi::Heap;
-use js::jsapi::{AddRawValueRoot, IsCallable, JSObject};
-use js::jsapi::{EnterRealm, LeaveRealm, Realm, RemoveRawValueRoot};
-use js::jsval::{JSVal, ObjectValue, UndefinedValue};
-use js::rust::wrappers::{JS_GetProperty, JS_WrapObject};
-use js::rust::{MutableHandleObject, Runtime};
-use std::default::Default;
-use std::ffi::CString;
-use std::mem::drop;
-use std::ops::Deref;
-use std::ptr;
-use std::rc::Rc;
 
 /// The exception handling used for a call.
 #[derive(Clone, Copy, PartialEq)]
@@ -40,7 +42,7 @@ pub enum ExceptionHandling {
 /// A common base class for representing IDL callback function and
 /// callback interface types.
 #[derive(JSTraceable)]
-#[unrooted_must_root_lint::must_root]
+#[crown::unrooted_must_root_lint::must_root]
 pub struct CallbackObject {
     /// The underlying `JSObject`.
     callback: Heap<*mut JSObject>,
@@ -61,14 +63,14 @@ pub struct CallbackObject {
 }
 
 impl Default for CallbackObject {
-    #[allow(unrooted_must_root)]
+    #[allow(crown::unrooted_must_root)]
     fn default() -> CallbackObject {
         CallbackObject::new()
     }
 }
 
 impl CallbackObject {
-    #[allow(unrooted_must_root)]
+    #[allow(crown::unrooted_must_root)]
     fn new() -> CallbackObject {
         CallbackObject {
             callback: Heap::default(),
@@ -131,14 +133,14 @@ pub trait CallbackContainer {
 
 /// A common base class for representing IDL callback function types.
 #[derive(JSTraceable, PartialEq)]
-#[unrooted_must_root_lint::must_root]
+#[crown::unrooted_must_root_lint::must_root]
 pub struct CallbackFunction {
     object: CallbackObject,
 }
 
 impl CallbackFunction {
     /// Create a new `CallbackFunction` for this object.
-    #[allow(unrooted_must_root)]
+    #[allow(crown::unrooted_must_root)]
     pub fn new() -> CallbackFunction {
         CallbackFunction {
             object: CallbackObject::new(),
@@ -159,7 +161,7 @@ impl CallbackFunction {
 
 /// A common base class for representing IDL callback interface types.
 #[derive(JSTraceable, PartialEq)]
-#[unrooted_must_root_lint::must_root]
+#[crown::unrooted_must_root_lint::must_root]
 pub struct CallbackInterface {
     object: CallbackObject,
 }
@@ -239,7 +241,7 @@ pub struct CallSetup {
 
 impl CallSetup {
     /// Performs the setup needed to make a call.
-    #[allow(unrooted_must_root)]
+    #[allow(crown::unrooted_must_root)]
     pub fn new<T: CallbackContainer>(callback: &T, handling: ExceptionHandling) -> CallSetup {
         let global = unsafe { GlobalScope::from_object(callback.callback()) };
         if let Some(window) = global.downcast::<Window>() {

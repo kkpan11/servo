@@ -2,6 +2,16 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
+use std::cmp::min;
+use std::ptr::{self, NonNull};
+
+use dom_struct::dom_struct;
+use js::jsapi::{Heap, JSObject, JS_GetArrayBufferViewBuffer};
+use js::rust::wrappers::DetachArrayBuffer;
+use js::rust::{CustomAutoRooterGuard, HandleObject};
+use js::typedarray::{CreateWith, Float32Array};
+use servo_media::audio::buffer_source_node::AudioBuffer as ServoMediaAudioBuffer;
+
 use crate::dom::audionode::MAX_CHANNEL_COUNT;
 use crate::dom::bindings::cell::{DomRefCell, Ref};
 use crate::dom::bindings::codegen::Bindings::AudioBufferBinding::{
@@ -15,16 +25,6 @@ use crate::dom::globalscope::GlobalScope;
 use crate::dom::window::Window;
 use crate::realms::enter_realm;
 use crate::script_runtime::JSContext;
-use dom_struct::dom_struct;
-use js::jsapi::JS_GetArrayBufferViewBuffer;
-use js::jsapi::{Heap, JSObject};
-use js::rust::wrappers::DetachArrayBuffer;
-use js::rust::CustomAutoRooterGuard;
-use js::rust::HandleObject;
-use js::typedarray::{CreateWith, Float32Array};
-use servo_media::audio::buffer_source_node::AudioBuffer as ServoMediaAudioBuffer;
-use std::cmp::min;
-use std::ptr::{self, NonNull};
 
 // Spec mandates at least [8000, 96000], we use [8000, 192000] to match Firefox
 // https://webaudio.github.io/web-audio-api/#dom-baseaudiocontext-createbuffer
@@ -50,6 +50,7 @@ pub struct AudioBuffer {
     /// Aggregates the data from js_channels.
     /// This is Some<T> iff the buffers in js_channels are detached.
     #[ignore_malloc_size_of = "servo_media"]
+    #[no_trace]
     shared_channels: DomRefCell<Option<ServoMediaAudioBuffer>>,
     /// https://webaudio.github.io/web-audio-api/#dom-audiobuffer-samplerate
     sample_rate: f32,
@@ -62,7 +63,7 @@ pub struct AudioBuffer {
 }
 
 impl AudioBuffer {
-    #[allow(unrooted_must_root)]
+    #[allow(crown::unrooted_must_root)]
     #[allow(unsafe_code)]
     pub fn new_inherited(number_of_channels: u32, length: u32, sample_rate: f32) -> AudioBuffer {
         let vec = (0..number_of_channels).map(|_| Heap::default()).collect();
@@ -94,7 +95,7 @@ impl AudioBuffer {
         )
     }
 
-    #[allow(unrooted_must_root)]
+    #[allow(crown::unrooted_must_root)]
     fn new_with_proto(
         global: &Window,
         proto: Option<HandleObject>,

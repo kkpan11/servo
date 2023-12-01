@@ -2,14 +2,19 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
+use std::fmt;
+
+use msg::constellation_msg::PipelineId;
+
 use crate::script_runtime::{CommonScriptMsg, ScriptChan, ScriptThreadEventCategory};
 use crate::task::{TaskCanceller, TaskOnce};
 use crate::task_source::{TaskSource, TaskSourceName};
-use msg::constellation_msg::PipelineId;
-use std::fmt;
 
 #[derive(JSTraceable)]
-pub struct PortMessageQueue(pub Box<dyn ScriptChan + Send + 'static>, pub PipelineId);
+pub struct PortMessageQueue(
+    pub Box<dyn ScriptChan + Send + 'static>,
+    #[no_trace] pub PipelineId,
+);
 
 impl Clone for PortMessageQueue {
     fn clone(&self) -> PortMessageQueue {

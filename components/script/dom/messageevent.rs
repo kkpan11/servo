@@ -2,6 +2,12 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
+use dom_struct::dom_struct;
+use js::jsapi::Heap;
+use js::jsval::JSVal;
+use js::rust::{HandleObject, HandleValue};
+use servo_atoms::Atom;
+
 use crate::dom::bindings::cell::DomRefCell;
 use crate::dom::bindings::codegen::Bindings::EventBinding::EventMethods;
 use crate::dom::bindings::codegen::Bindings::MessageEventBinding;
@@ -21,13 +27,8 @@ use crate::dom::messageport::MessagePort;
 use crate::dom::serviceworker::ServiceWorker;
 use crate::dom::windowproxy::WindowProxy;
 use crate::script_runtime::JSContext;
-use dom_struct::dom_struct;
-use js::jsapi::Heap;
-use js::jsval::JSVal;
-use js::rust::{HandleObject, HandleValue};
-use servo_atoms::Atom;
 
-#[unrooted_must_root_lint::must_root]
+#[crown::unrooted_must_root_lint::must_root]
 #[derive(JSTraceable, MallocSizeOf)]
 enum SrcObject {
     WindowProxy(Dom<WindowProxy>),
@@ -36,7 +37,7 @@ enum SrcObject {
 }
 
 impl From<&WindowProxyOrMessagePortOrServiceWorker> for SrcObject {
-    #[allow(unrooted_must_root)]
+    #[allow(crown::unrooted_must_root)]
     fn from(src_object: &WindowProxyOrMessagePortOrServiceWorker) -> SrcObject {
         match src_object {
             WindowProxyOrMessagePortOrServiceWorker::WindowProxy(blob) => {

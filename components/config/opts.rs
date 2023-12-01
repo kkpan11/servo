@@ -5,27 +5,29 @@
 //! Configuration options for a single run of the servo application. Created
 //! from command line arguments.
 
-use euclid::Size2D;
-use getopts::{Matches, Options};
-use servo_geometry::DeviceIndependentPixel;
-use servo_url::ServoUrl;
 use std::default::Default;
-use std::env;
 use std::fs::{self, File};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
-use std::process;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{RwLock, RwLockReadGuard};
+use std::{env, process};
+
+use euclid::Size2D;
+use getopts::{Matches, Options};
+use lazy_static::lazy_static;
+use log::error;
+use serde::{Deserialize, Serialize};
+use servo_geometry::DeviceIndependentPixel;
+use servo_url::ServoUrl;
 use url::{self, Url};
+
+use crate::{pref, set_pref};
 
 /// Global flags for Servo, currently set on the command line.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct Opts {
     pub is_running_problem_test: bool,
-
-    /// The initial URL to load.
-    pub url: Option<ServoUrl>,
 
     /// Whether or not the legacy layout system is enabled.
     pub legacy_layout: bool,
@@ -113,8 +115,13 @@ pub struct Opts {
     /// Print the version and exit.
     pub is_printing_version: bool,
 
-    /// Path to SSL certificates.
+    /// Path to PEM encoded SSL CA certificate store.
     pub certificate_path: Option<String>,
+
+    /// Whether or not to completely ignore SSL certificate validation errors.
+    /// TODO: We should see if we can eliminate the need for this by fixing
+    /// https://github.com/servo/servo/issues/30080.
+    pub ignore_certificate_errors: bool,
 
     /// Unminify Javascript.
     pub unminify_js: bool,
@@ -124,6 +131,9 @@ pub struct Opts {
 
     /// Print Progressive Web Metrics to console.
     pub print_pwm: bool,
+
+    /// True to enable minibrowser
+    pub minibrowser: bool,
 }
 
 fn print_usage(app: &str, opts: &Options) {
@@ -166,8 +176,11 @@ pub struct DebugOptions {
     /// Dumps the rule tree.
     pub dump_rule_tree: bool,
 
-    /// Print the flow tree after each layout.
+    /// Print the flow tree (Layout 2013) or fragment tree (Layout 2020) after each layout.
     pub dump_flow_tree: bool,
+
+    /// Print the stacking context tree after each layout.
+    pub dump_stacking_context_tree: bool,
 
     /// Print the display list after each layout.
     pub dump_display_list: bool,
@@ -237,6 +250,7 @@ impl DebugOptions {
                 "disable-text-aa" => self.disable_text_antialiasing = true,
                 "dump-display-list" => self.dump_display_list = true,
                 "dump-display-list-json" => self.dump_display_list_json = true,
+                "dump-stacking-context-tree" => self.dump_stacking_context_tree = true,
                 "dump-flow-tree" => self.dump_flow_tree = true,
                 "dump-rule-tree" => self.dump_rule_tree = true,
                 "dump-style-tree" => self.dump_style_tree = true,
@@ -296,6 +310,10 @@ impl DebugOptions {
         );
         print_option("disable-text-aa", "Disable antialiasing of rendered text.");
         print_option(
+            "dump-stacking-context-tree",
+            "Print the stacking context tree after each layout.",
+        );
+        print_option(
             "dump-display-list",
             "Print the display list after each layout.",
         );
@@ -303,7 +321,10 @@ impl DebugOptions {
             "dump-display-list-json",
             "Print the display list in JSON form.",
         );
-        print_option("dump-flow-tree", "Print the flow tree after each layout.");
+        print_option(
+            "dump-flow-tree",
+            "Print the flow tree (Layout 2013) or fragment tree (Layout 2020) after each layout.",
+        );
         print_option(
             "dump-rule-tree",
             "Print the style rule tree after each layout.",
@@ -378,7 +399,6 @@ pub fn multiprocess() -> bool {
 pub fn default_opts() -> Opts {
     Opts {
         is_running_problem_test: false,
-        url: None,
         legacy_layout: false,
         tile_size: 512,
         time_profiling: None,
@@ -405,9 +425,11 @@ pub fn default_opts() -> Opts {
         is_printing_version: false,
         shaders_dir: None,
         certificate_path: None,
+        ignore_certificate_errors: false,
         unminify_js: false,
         local_script_source: None,
         print_pwm: false,
+        minibrowser: true,
     }
 }
 
@@ -415,8 +437,6 @@ pub fn from_cmdline_args(mut opts: Options, args: &[String]) -> ArgumentParsingR
     let (app_name, args) = args.split_first().unwrap();
 
     opts.optflag("", "legacy-layout", "Use the legacy layout engine");
-    opts.optflag("c", "cpu", "CPU painting");
-    opts.optflag("g", "gpu", "GPU painting");
     opts.optopt("o", "output", "Output file", "output.png");
     opts.optopt("s", "size", "Size of tiles", "512");
     opts.optflagopt(
@@ -522,15 +542,17 @@ pub fn from_cmdline_args(mut opts: Options, args: &[String]) -> ArgumentParsingR
         "Path to find SSL certificates",
         "/home/servo/resources/certs",
     );
+    opts.optflag(
+        "",
+        "ignore-certificate-errors",
+        "Whether or not to completely ignore certificate errors",
+    );
     opts.optopt(
         "",
         "content-process",
         "Run as a content process and connect to the given pipe",
         "servo-ipc-channel.abcdefg",
     );
-    opts.optflag("b", "no-native-titlebar", "Do not use native titlebar");
-    opts.optflag("w", "webrender", "Use webrender backend");
-    opts.optopt("G", "graphics", "Select graphics backend (gl or es2)", "gl");
     opts.optopt(
         "",
         "config-dir",
@@ -539,17 +561,14 @@ pub fn from_cmdline_args(mut opts: Options, args: &[String]) -> ArgumentParsingR
     );
     opts.optflag("v", "version", "Display servo version information");
     opts.optflag("", "unminify-js", "Unminify Javascript");
-    opts.optopt("", "profiler-db-user", "Profiler database user", "");
-    opts.optopt("", "profiler-db-pass", "Profiler database password", "");
-    opts.optopt("", "profiler-db-name", "Profiler database name", "");
     opts.optflag("", "print-pwm", "Print Progressive Web Metrics");
-    opts.optopt("", "vslogger-level", "Visual Studio logger level", "Warn");
     opts.optopt(
         "",
         "local-script-source",
         "Directory root with unminified scripts",
         "",
     );
+    opts.optflag("", "no-minibrowser", "Open minibrowser");
 
     let opt_match = match opts.parse(args) {
         Ok(m) => m,
@@ -589,15 +608,6 @@ pub fn from_cmdline_args(mut opts: Options, args: &[String]) -> ArgumentParsingR
         url.starts_with("http://web-platform.test:8000/2dcontext/drawing-images-to-the-canvas/") ||
             url.starts_with("http://web-platform.test:8000/_mozilla/mozilla/canvas/") ||
             url.starts_with("http://web-platform.test:8000/_mozilla/css/canvas_over_area.html")
-    });
-
-    let url_opt = url_opt.and_then(|url_string| {
-        parse_url_or_filename(&cwd, url_string)
-            .map_err(|error| {
-                warn!("URL parsing failed ({:?}).", error);
-                error
-            })
-            .ok()
     });
 
     let tile_size: usize = match opt_match.opt_str("s") {
@@ -745,7 +755,6 @@ pub fn from_cmdline_args(mut opts: Options, args: &[String]) -> ArgumentParsingR
     let opts = Opts {
         debug: debug_options.clone(),
         is_running_problem_test,
-        url: url_opt,
         legacy_layout,
         tile_size,
         time_profiling,
@@ -771,9 +780,11 @@ pub fn from_cmdline_args(mut opts: Options, args: &[String]) -> ArgumentParsingR
         is_printing_version,
         shaders_dir: opt_match.opt_str("shaders").map(Into::into),
         certificate_path: opt_match.opt_str("certificate-path"),
+        ignore_certificate_errors: opt_match.opt_present("ignore-certificate-errors"),
         unminify_js: opt_match.opt_present("unminify-js"),
         local_script_source: opt_match.opt_str("local-script-source"),
         print_pwm: opt_match.opt_present("print-pwm"),
+        minibrowser: !opt_match.opt_present("no-minibrowser"),
     };
 
     set_options(opts);
@@ -805,14 +816,4 @@ pub fn set_options(opts: Opts) {
 #[inline]
 pub fn get() -> RwLockReadGuard<'static, Opts> {
     OPTIONS.read().unwrap()
-}
-
-pub fn parse_url_or_filename(cwd: &Path, input: &str) -> Result<ServoUrl, ()> {
-    match ServoUrl::parse(input) {
-        Ok(url) => Ok(url),
-        Err(url::ParseError::RelativeUrlWithoutBase) => {
-            Url::from_file_path(&*cwd.join(input)).map(ServoUrl::from_url)
-        },
-        Err(_) => Err(()),
-    }
 }

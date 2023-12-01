@@ -2,11 +2,22 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
+use std::cell::Cell;
+use std::collections::HashMap;
+use std::rc::Rc;
+
+use bluetooth_traits::{
+    BluetoothCharacteristicMsg, BluetoothDescriptorMsg, BluetoothRequest, BluetoothResponse,
+    BluetoothServiceMsg,
+};
+use dom_struct::dom_struct;
+use ipc_channel::ipc::IpcSender;
+use profile_traits::ipc;
+
 use crate::dom::bindings::cell::DomRefCell;
 use crate::dom::bindings::codegen::Bindings::BluetoothDeviceBinding::BluetoothDeviceMethods;
 use crate::dom::bindings::codegen::Bindings::BluetoothRemoteGATTServerBinding::BluetoothRemoteGATTServerMethods;
-use crate::dom::bindings::error::Error;
-use crate::dom::bindings::error::ErrorResult;
+use crate::dom::bindings::error::{Error, ErrorResult};
 use crate::dom::bindings::inheritance::Castable;
 use crate::dom::bindings::reflector::{reflect_dom_object, DomObject};
 use crate::dom::bindings::root::{Dom, DomRoot, MutNullableDom};
@@ -21,14 +32,6 @@ use crate::dom::eventtarget::EventTarget;
 use crate::dom::globalscope::GlobalScope;
 use crate::dom::promise::Promise;
 use crate::realms::InRealm;
-use bluetooth_traits::{BluetoothCharacteristicMsg, BluetoothDescriptorMsg};
-use bluetooth_traits::{BluetoothRequest, BluetoothResponse, BluetoothServiceMsg};
-use dom_struct::dom_struct;
-use ipc_channel::ipc::IpcSender;
-use profile_traits::ipc;
-use std::cell::Cell;
-use std::collections::HashMap;
-use std::rc::Rc;
 
 // https://webbluetoothcg.github.io/web-bluetooth/#bluetoothdevice
 #[dom_struct]
@@ -184,7 +187,7 @@ impl BluetoothDevice {
     }
 
     // https://webbluetoothcg.github.io/web-bluetooth/#clean-up-the-disconnected-device
-    #[allow(unrooted_must_root)]
+    #[allow(crown::unrooted_must_root)]
     pub fn clean_up_disconnected_device(&self) {
         // Step 1.
         self.get_gatt().set_connected(false);
@@ -220,7 +223,7 @@ impl BluetoothDevice {
     }
 
     // https://webbluetoothcg.github.io/web-bluetooth/#garbage-collect-the-connection
-    #[allow(unrooted_must_root)]
+    #[allow(crown::unrooted_must_root)]
     pub fn garbage_collect_the_connection(&self) -> ErrorResult {
         // Step 1: TODO: Check if other systems using this device.
 

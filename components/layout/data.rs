@@ -2,10 +2,12 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
-use crate::construct::ConstructionResult;
 use atomic_refcell::AtomicRefCell;
+use bitflags::bitflags;
 use script_layout_interface::wrapper_traits::LayoutDataTrait;
 use script_layout_interface::StyleData;
+
+use crate::construct::ConstructionResult;
 
 pub struct StyleAndLayoutData<'dom> {
     /// The style data associated with a node.
@@ -51,10 +53,11 @@ impl Default for LayoutData {
 }
 
 bitflags! {
+    #[derive(Clone, Copy)]
     pub struct LayoutDataFlags: u8 {
-        #[doc = "Whether a flow has been newly constructed."]
+        /// Whether a flow has been newly constructed.
         const HAS_NEWLY_CONSTRUCTED_FLOW = 0x01;
-        #[doc = "Whether this node has been traversed by layout."]
+        /// Whether this node has been traversed by layout.
         const HAS_BEEN_TRAVERSED = 0x02;
     }
 }

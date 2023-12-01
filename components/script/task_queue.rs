@@ -4,17 +4,19 @@
 
 //! Machinery for [task-queue](https://html.spec.whatwg.org/multipage/#task-queue).
 
+use std::cell::Cell;
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::default::Default;
+
+use crossbeam_channel::{self, Receiver, Sender};
+use msg::constellation_msg::PipelineId;
+
 use crate::dom::bindings::cell::DomRefCell;
 use crate::dom::worker::TrustedWorkerAddress;
 use crate::script_runtime::ScriptThreadEventCategory;
 use crate::script_thread::ScriptThread;
 use crate::task::TaskBox;
 use crate::task_source::TaskSourceName;
-use crossbeam_channel::{self, Receiver, Sender};
-use msg::constellation_msg::PipelineId;
-use std::cell::Cell;
-use std::collections::{HashMap, HashSet, VecDeque};
-use std::default::Default;
 
 pub type QueuedTask = (
     Option<TrustedWorkerAddress>,
@@ -118,23 +120,29 @@ impl<T: QueuedTaskConversion> TaskQueue<T> {
         }
 
         // 4. Filter tasks from non-priority task-sources.
-        let to_be_throttled: Vec<T> = incoming
-            .drain_filter(|msg| {
-                let task_source = match msg.task_source_name() {
-                    Some(task_source) => task_source,
-                    None => return false,
-                };
-                match task_source {
-                    TaskSourceName::PerformanceTimeline => return true,
-                    _ => {
-                        // A task that will not be throttled, start counting "business"
-                        self.taken_task_counter
-                            .set(self.taken_task_counter.get() + 1);
-                        return false;
-                    },
-                }
-            })
-            .collect();
+        // TODO: This can use `extract_if` once that is stabilized.
+        let mut to_be_throttled = Vec::new();
+        let mut index = 0;
+        while index != incoming.len() {
+            index += 1; // By default we go to the next index of the vector.
+
+            let task_source = match incoming[index - 1].task_source_name() {
+                Some(task_source) => task_source,
+                None => continue,
+            };
+
+            match task_source {
+                TaskSourceName::PerformanceTimeline => {
+                    to_be_throttled.push(incoming.remove(index - 1));
+                    index -= 1; // We've removed an element, so the next has the same index.
+                },
+                _ => {
+                    // A task that will not be throttled, start counting "business"
+                    self.taken_task_counter
+                        .set(self.taken_task_counter.get() + 1);
+                },
+            }
+        }
 
         for msg in incoming {
             if let Some(pipeline_id) = msg.pipeline_id() {

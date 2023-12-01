@@ -2,6 +2,13 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
+use std::cell::Cell;
+
+use dom_struct::dom_struct;
+use html5ever::{local_name, namespace_url, ns, LocalName, QualName};
+use servo_atoms::Atom;
+use style::str::split_html_space_chars;
+
 use crate::dom::bindings::codegen::Bindings::HTMLCollectionBinding::HTMLCollectionMethods;
 use crate::dom::bindings::inheritance::Castable;
 use crate::dom::bindings::reflector::{reflect_dom_object, Reflector};
@@ -12,11 +19,6 @@ use crate::dom::bindings::xmlname::namespace_from_domstring;
 use crate::dom::element::Element;
 use crate::dom::node::{document_from_node, Node};
 use crate::dom::window::Window;
-use dom_struct::dom_struct;
-use html5ever::{LocalName, QualName};
-use servo_atoms::Atom;
-use std::cell::Cell;
-use style::str::split_html_space_chars;
 
 pub trait CollectionFilter: JSTraceable {
     fn filter<'a>(&self, elem: &'a Element, root: &'a Node) -> bool;
@@ -67,7 +69,7 @@ pub struct HTMLCollection {
 }
 
 impl HTMLCollection {
-    #[allow(unrooted_must_root)]
+    #[allow(crown::unrooted_must_root)]
     pub fn new_inherited(
         root: &Node,
         filter: Box<dyn CollectionFilter + 'static>,
@@ -97,7 +99,7 @@ impl HTMLCollection {
         Self::new(window, root, Box::new(NoFilter))
     }
 
-    #[allow(unrooted_must_root)]
+    #[allow(crown::unrooted_must_root)]
     pub fn new(
         window: &Window,
         root: &Node,
@@ -164,7 +166,9 @@ impl HTMLCollection {
 
         #[derive(JSTraceable, MallocSizeOf)]
         struct HtmlDocumentFilter {
+            #[no_trace]
             qualified_name: LocalName,
+            #[no_trace]
             ascii_lower_qualified_name: LocalName,
         }
         impl CollectionFilter for HtmlDocumentFilter {
@@ -216,6 +220,7 @@ impl HTMLCollection {
     ) -> DomRoot<HTMLCollection> {
         #[derive(JSTraceable, MallocSizeOf)]
         struct TagNameNSFilter {
+            #[no_trace]
             qname: QualName,
         }
         impl CollectionFilter for TagNameNSFilter {
@@ -245,6 +250,7 @@ impl HTMLCollection {
     ) -> DomRoot<HTMLCollection> {
         #[derive(JSTraceable, MallocSizeOf)]
         struct ClassNameFilter {
+            #[no_trace]
             classes: Vec<Atom>,
         }
         impl CollectionFilter for ClassNameFilter {

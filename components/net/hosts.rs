@@ -10,6 +10,8 @@ use std::io::{BufReader, Read};
 use std::net::{IpAddr, Ipv4Addr};
 use std::sync::Mutex;
 
+use lazy_static::lazy_static;
+
 lazy_static! {
     static ref HOST_TABLE: Mutex<Option<HashMap<String, IpAddr>>> = Mutex::new(create_host_table());
 }

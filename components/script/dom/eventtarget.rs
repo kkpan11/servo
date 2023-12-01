@@ -2,23 +2,44 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
+use std::collections::hash_map::Entry::{Occupied, Vacant};
+use std::default::Default;
+use std::ffi::CString;
+use std::hash::BuildHasherDefault;
+use std::mem;
+use std::ops::{Deref, DerefMut};
+use std::rc::Rc;
+
+use deny_public_fields::DenyPublicFields;
+use dom_struct::dom_struct;
+use fnv::FnvHasher;
+use js::jsapi::JS_GetFunctionObject;
+use js::rust::wrappers::CompileFunction;
+use js::rust::{
+    transform_u16_to_source_text, CompileOptionsWrapper, HandleObject, RootedObjectVectorWrapper,
+};
+use libc::c_char;
+use servo_atoms::Atom;
+use servo_url::ServoUrl;
+
+use super::bindings::trace::HashMapTracedValues;
 use crate::dom::beforeunloadevent::BeforeUnloadEvent;
 use crate::dom::bindings::callback::{CallbackContainer, CallbackFunction, ExceptionHandling};
 use crate::dom::bindings::cell::DomRefCell;
 use crate::dom::bindings::codegen::Bindings::BeforeUnloadEventBinding::BeforeUnloadEventMethods;
 use crate::dom::bindings::codegen::Bindings::ErrorEventBinding::ErrorEventMethods;
 use crate::dom::bindings::codegen::Bindings::EventBinding::EventMethods;
-use crate::dom::bindings::codegen::Bindings::EventHandlerBinding::EventHandlerNonNull;
-use crate::dom::bindings::codegen::Bindings::EventHandlerBinding::OnBeforeUnloadEventHandlerNonNull;
-use crate::dom::bindings::codegen::Bindings::EventHandlerBinding::OnErrorEventHandlerNonNull;
+use crate::dom::bindings::codegen::Bindings::EventHandlerBinding::{
+    EventHandlerNonNull, OnBeforeUnloadEventHandlerNonNull, OnErrorEventHandlerNonNull,
+};
 use crate::dom::bindings::codegen::Bindings::EventListenerBinding::EventListener;
-use crate::dom::bindings::codegen::Bindings::EventTargetBinding::AddEventListenerOptions;
-use crate::dom::bindings::codegen::Bindings::EventTargetBinding::EventListenerOptions;
-use crate::dom::bindings::codegen::Bindings::EventTargetBinding::EventTargetMethods;
+use crate::dom::bindings::codegen::Bindings::EventTargetBinding::{
+    AddEventListenerOptions, EventListenerOptions, EventTargetMethods,
+};
 use crate::dom::bindings::codegen::Bindings::WindowBinding::WindowMethods;
-use crate::dom::bindings::codegen::UnionTypes::AddEventListenerOptionsOrBoolean;
-use crate::dom::bindings::codegen::UnionTypes::EventListenerOptionsOrBoolean;
-use crate::dom::bindings::codegen::UnionTypes::EventOrString;
+use crate::dom::bindings::codegen::UnionTypes::{
+    AddEventListenerOptionsOrBoolean, EventListenerOptionsOrBoolean, EventOrString,
+};
 use crate::dom::bindings::error::{report_pending_exception, Error, Fallible};
 use crate::dom::bindings::inheritance::Castable;
 use crate::dom::bindings::reflector::{reflect_dom_object_with_proto, DomObject, Reflector};
@@ -34,23 +55,6 @@ use crate::dom::virtualmethods::VirtualMethods;
 use crate::dom::window::Window;
 use crate::dom::workerglobalscope::WorkerGlobalScope;
 use crate::realms::{enter_realm, InRealm};
-use dom_struct::dom_struct;
-use fnv::FnvHasher;
-use js::jsapi::JS_GetFunctionObject;
-use js::rust::transform_u16_to_source_text;
-use js::rust::wrappers::CompileFunction;
-use js::rust::{CompileOptionsWrapper, HandleObject, RootedObjectVectorWrapper};
-use libc::c_char;
-use servo_atoms::Atom;
-use servo_url::ServoUrl;
-use std::collections::hash_map::Entry::{Occupied, Vacant};
-use std::collections::HashMap;
-use std::default::Default;
-use std::ffi::CString;
-use std::hash::BuildHasherDefault;
-use std::mem;
-use std::ops::{Deref, DerefMut};
-use std::rc::Rc;
 
 #[derive(Clone, JSTraceable, MallocSizeOf, PartialEq)]
 pub enum CommonEventHandler {
@@ -81,6 +85,7 @@ pub enum ListenerPhase {
 #[derive(Clone, JSTraceable, MallocSizeOf, PartialEq)]
 struct InternalRawUncompiledHandler {
     source: DOMString,
+    #[no_trace]
     url: ServoUrl,
     line: usize,
 }
@@ -344,7 +349,7 @@ impl EventListeners {
 #[dom_struct]
 pub struct EventTarget {
     reflector_: Reflector,
-    handlers: DomRefCell<HashMap<Atom, EventListeners, BuildHasherDefault<FnvHasher>>>,
+    handlers: DomRefCell<HashMapTracedValues<Atom, EventListeners, BuildHasherDefault<FnvHasher>>>,
 }
 
 impl EventTarget {
@@ -367,6 +372,8 @@ impl EventTarget {
         Ok(EventTarget::new(global, proto))
     }
 
+    /// Determine if there are any listeners for a given event type.
+    /// See <https://github.com/whatwg/dom/issues/453>.
     pub fn has_listeners_for(&self, type_: &Atom) -> bool {
         match self.handlers.borrow().get(type_) {
             Some(listeners) => listeners.has_listeners(),
@@ -441,7 +448,7 @@ impl EventTarget {
 
         let listener = EventListenerType::Additive(listener.clone());
         if let Some(entries) = handlers.get_mut(ty) {
-            entries.drain_filter(|e| e.listener == listener && e.once);
+            entries.retain(|e| e.listener != listener || !e.once)
         }
     }
 

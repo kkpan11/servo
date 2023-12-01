@@ -8,94 +8,86 @@
 //! The layout thread. Performs layout on the DOM, builds display lists and sends them to be
 //! painted.
 
-#[macro_use]
-extern crate crossbeam_channel;
-#[macro_use]
-extern crate layout;
-#[macro_use]
-extern crate lazy_static;
-#[macro_use]
-extern crate log;
-#[macro_use]
-extern crate profile_traits;
+use std::borrow::ToOwned;
+use std::cell::{Cell, RefCell};
+use std::collections::HashMap;
+use std::ops::{Deref, DerefMut};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard};
+use std::time::Duration;
+use std::{process, thread};
 
 use app_units::Au;
-use crossbeam_channel::{Receiver, Sender};
+use crossbeam_channel::{select, Receiver, Sender};
 use embedder_traits::resources::{self, Resource};
-use euclid::{default::Size2D as UntypedSize2D, Point2D, Rect, Scale, Size2D};
+use euclid::default::Size2D as UntypedSize2D;
+use euclid::{Point2D, Rect, Scale, Size2D};
 use fnv::FnvHashMap;
 use fxhash::{FxHashMap, FxHashSet};
-use gfx::font;
 use gfx::font_cache_thread::FontCacheThread;
-use gfx::font_context;
+use gfx::{font, font_context};
 use gfx_traits::{node_id_from_scroll_id, Epoch};
 use histogram::Histogram;
 use ipc_channel::ipc::{self, IpcReceiver, IpcSender};
 use ipc_channel::router::ROUTER;
 use layout::construct::ConstructionResult;
-use layout::context::malloc_size_of_persistent_local_context;
-use layout::context::LayoutContext;
-use layout::context::RegisteredPainter;
-use layout::context::RegisteredPainters;
+use layout::context::{
+    malloc_size_of_persistent_local_context, LayoutContext, RegisteredPainter, RegisteredPainters,
+};
 use layout::display_list::items::WebRenderImageInfo;
 use layout::display_list::{IndexableText, ToLayout};
 use layout::flow::{Flow, FlowFlags, GetBaseFlow, ImmutableFlowUtils, MutableOwnedFlowUtils};
 use layout::flow_ref::FlowRef;
 use layout::incremental::{RelayoutMode, SpecialRestyleDamage};
-use layout::parallel;
 use layout::query::{
     process_client_rect_query, process_content_box_request, process_content_boxes_request,
-    process_element_inner_text_query, process_node_scroll_area_request,
-    process_node_scroll_id_request, process_offset_parent_query,
-    process_resolved_font_style_request, process_resolved_style_request, LayoutRPCImpl,
-    LayoutThreadData,
+    process_element_inner_text_query, process_node_scroll_id_request, process_offset_parent_query,
+    process_resolved_font_style_request, process_resolved_style_request,
+    process_scrolling_area_request, LayoutRPCImpl, LayoutThreadData,
 };
-use layout::sequential;
 use layout::traversal::{
     construct_flows_at_ancestors, ComputeStackingRelativePositions, PreorderFlowTraversal,
     RecalcStyleAndConstructFlows,
 };
 use layout::wrapper::LayoutNodeLayoutData;
-use layout::{layout_debug, LayoutData};
+use layout::{layout_debug, layout_debug_scope, parallel, sequential, LayoutData};
 use layout_traits::LayoutThreadFactory;
+use lazy_static::lazy_static;
+use log::{debug, error, trace, warn};
 use malloc_size_of::{MallocSizeOf, MallocSizeOfOps};
 use metrics::{PaintTimeMetrics, ProfilerMetadataFactory, ProgressiveWebMetric};
 use msg::constellation_msg::{
-    BackgroundHangMonitor, BackgroundHangMonitorRegister, HangAnnotation,
+    BackgroundHangMonitor, BackgroundHangMonitorRegister, BrowsingContextId, HangAnnotation,
+    LayoutHangAnnotation, MonitoredComponentId, MonitoredComponentType, PipelineId,
+    TopLevelBrowsingContextId,
 };
-use msg::constellation_msg::{BrowsingContextId, MonitoredComponentId, TopLevelBrowsingContextId};
-use msg::constellation_msg::{LayoutHangAnnotation, MonitoredComponentType, PipelineId};
 use net_traits::image_cache::{ImageCache, UsePlaceholder};
 use parking_lot::RwLock;
 use profile_traits::mem::{self as profile_mem, Report, ReportKind, ReportsChan};
-use profile_traits::time::{self as profile_time, profile, TimerMetadata};
-use profile_traits::time::{TimerMetadataFrameType, TimerMetadataReflowType};
+use profile_traits::path;
+use profile_traits::time::{
+    self as profile_time, profile, TimerMetadata, TimerMetadataFrameType, TimerMetadataReflowType,
+};
 use script::layout_dom::{ServoLayoutDocument, ServoLayoutElement, ServoLayoutNode};
-use script_layout_interface::message::{LayoutThreadInit, Msg, NodesFromPointQueryType, Reflow};
-use script_layout_interface::message::{QueryMsg, ReflowComplete, ReflowGoal, ScriptReflow};
-use script_layout_interface::rpc::TextIndexResponse;
-use script_layout_interface::rpc::{LayoutRPC, OffsetParentResponse};
+use script_layout_interface::message::{
+    LayoutThreadInit, Msg, NodesFromPointQueryType, QueryMsg, Reflow, ReflowComplete, ReflowGoal,
+    ScriptReflow,
+};
+use script_layout_interface::rpc::{LayoutRPC, OffsetParentResponse, TextIndexResponse};
 use script_layout_interface::wrapper_traits::LayoutNode;
-use script_traits::{ConstellationControlMsg, LayoutControlMsg, LayoutMsg as ConstellationMsg};
-use script_traits::{DrawAPaintImageResult, IFrameSizeMsg, PaintWorkletError, WindowSizeType};
-use script_traits::{Painter, WebrenderIpcSender};
-use script_traits::{ScrollState, UntrustedNodeAddress, WindowSizeData};
+use script_traits::{
+    ConstellationControlMsg, DrawAPaintImageResult, IFrameSizeMsg, LayoutControlMsg,
+    LayoutMsg as ConstellationMsg, PaintWorkletError, Painter, ScrollState, UntrustedNodeAddress,
+    WebrenderIpcSender, WindowSizeData, WindowSizeType,
+};
 use servo_arc::Arc as ServoArc;
 use servo_atoms::Atom;
 use servo_config::opts::{self, DebugOptions};
 use servo_url::{ImmutableOrigin, ServoUrl};
-use std::borrow::ToOwned;
-use std::cell::{Cell, RefCell};
-use std::collections::HashMap;
-use std::ops::{Deref, DerefMut};
-use std::process;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard};
-use std::thread;
-use std::time::Duration;
 use style::animation::{AnimationSetKey, DocumentAnimationSet, ElementAnimationSet};
-use style::context::SharedStyleContext;
-use style::context::{QuirksMode, RegisteredSpeculativePainter, RegisteredSpeculativePainters};
+use style::context::{
+    QuirksMode, RegisteredSpeculativePainter, RegisteredSpeculativePainters, SharedStyleContext,
+};
 use style::dom::{ShowSubtree, ShowSubtreeDataAndPrimaryValues, TElement, TNode};
 use style::driver;
 use style::error_reporting::RustLogReporter;
@@ -114,10 +106,8 @@ use style::stylist::Stylist;
 use style::thread_state::{self, ThreadState};
 use style::traversal::DomTraversal;
 use style::traversal_flags::TraversalFlags;
-use style_traits::CSSPixel;
-use style_traits::DevicePixel;
-use style_traits::SpeculativePainter;
-use webrender_api::{units, ColorF, HitTestFlags, ScrollClamping};
+use style_traits::{CSSPixel, DevicePixel, SpeculativePainter};
+use webrender_api::{units, ColorF, HitTestFlags};
 
 /// Information needed by the layout thread.
 pub struct LayoutThread {
@@ -501,7 +491,7 @@ impl LayoutThread {
                 content_boxes_response: Vec::new(),
                 client_rect_response: Rect::zero(),
                 scroll_id_response: None,
-                scroll_area_response: Rect::zero(),
+                scrolling_area_response: Rect::zero(),
                 resolved_style_response: String::new(),
                 resolved_font_style_response: None,
                 offset_parent_response: OffsetParentResponse::empty(),
@@ -1081,7 +1071,7 @@ impl LayoutThread {
                     .maybe_observe_paint_time(self, epoch, is_contentful.0);
 
                 self.webrender_api
-                    .send_display_list(compositor_info, builder.finalize());
+                    .send_display_list(compositor_info, builder.finalize().1);
             },
         );
     }
@@ -1130,8 +1120,8 @@ impl LayoutThread {
                         &QueryMsg::ClientRectQuery(_) => {
                             rw_data.client_rect_response = Rect::zero();
                         },
-                        &QueryMsg::NodeScrollGeometryQuery(_) => {
-                            rw_data.scroll_area_response = Rect::zero();
+                        &QueryMsg::ScrollingAreaQuery(_) => {
+                            rw_data.scrolling_area_response = Rect::zero();
                         },
                         &QueryMsg::NodeScrollIdQuery(_) => {
                             rw_data.scroll_id_response = None;
@@ -1440,9 +1430,9 @@ impl LayoutThread {
                 &QueryMsg::ClientRectQuery(node) => {
                     rw_data.client_rect_response = process_client_rect_query(node, root_flow);
                 },
-                &QueryMsg::NodeScrollGeometryQuery(node) => {
-                    rw_data.scroll_area_response =
-                        process_node_scroll_area_request(node, root_flow);
+                &QueryMsg::ScrollingAreaQuery(node) => {
+                    rw_data.scrolling_area_response =
+                        process_scrolling_area_request(node, root_flow);
                 },
                 &QueryMsg::NodeScrollIdQuery(node) => {
                     let node: ServoLayoutNode<LayoutData> = unsafe { ServoLayoutNode::new(&node) };
@@ -1516,11 +1506,8 @@ impl LayoutThread {
             .insert(state.scroll_id, state.scroll_offset);
 
         let point = Point2D::new(-state.scroll_offset.x, -state.scroll_offset.y);
-        self.webrender_api.send_scroll_node(
-            units::LayoutPoint::from_untyped(point),
-            state.scroll_id,
-            ScrollClamping::ToContentBounds,
-        );
+        self.webrender_api
+            .send_scroll_node(units::LayoutPoint::from_untyped(point), state.scroll_id);
     }
 
     fn set_scroll_states<'a, 'b>(
@@ -1796,14 +1783,10 @@ fn get_root_flow_background_color(flow: &mut dyn Flow) -> ColorF {
             .fragment
             .style
             .get_background()
-            .background_color,
+            .background_color
+            .clone(),
     );
-    ColorF::new(
-        color.red_f32(),
-        color.green_f32(),
-        color.blue_f32(),
-        color.alpha_f32(),
-    )
+    color.to_layout()
 }
 
 fn get_ua_stylesheets() -> Result<UserAgentStylesheets, &'static str> {

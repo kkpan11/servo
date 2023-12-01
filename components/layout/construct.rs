@@ -11,54 +11,20 @@
 //! maybe it's an absolute or fixed position thing that hasn't found its containing block yet.
 //! Construction items bubble up the tree from children to parents until they find their homes.
 
-use crate::block::BlockFlow;
-use crate::context::{with_thread_local_font_context, LayoutContext};
-use crate::data::{LayoutData, LayoutDataFlags};
-use crate::display_list::items::OpaqueNode;
-use crate::flex::FlexFlow;
-use crate::floats::FloatKind;
-use crate::flow::{AbsoluteDescendants, Flow, FlowClass, GetBaseFlow, ImmutableFlowUtils};
-use crate::flow::{FlowFlags, MutableFlowUtils, MutableOwnedFlowUtils};
-use crate::flow_ref::FlowRef;
-use crate::fragment::{
-    CanvasFragmentInfo, Fragment, FragmentFlags, GeneratedContentInfo, IframeFragmentInfo,
-};
-use crate::fragment::{
-    ImageFragmentInfo, InlineAbsoluteFragmentInfo, InlineAbsoluteHypotheticalFragmentInfo,
-};
-use crate::fragment::{
-    InlineBlockFragmentInfo, MediaFragmentInfo, SpecificFragmentInfo, SvgFragmentInfo,
-};
-use crate::fragment::{
-    TableColumnFragmentInfo, UnscannedTextFragmentInfo, WhitespaceStrippingResult,
-};
-use crate::inline::{InlineFlow, InlineFragmentNodeFlags, InlineFragmentNodeInfo};
-use crate::linked_list::prepend_from;
-use crate::list_item::{ListItemFlow, ListStyleTypeContent};
-use crate::multicol::{MulticolColumnFlow, MulticolFlow};
-use crate::parallel;
-use crate::table::TableFlow;
-use crate::table_caption::TableCaptionFlow;
-use crate::table_cell::TableCellFlow;
-use crate::table_colgroup::TableColGroupFlow;
-use crate::table_row::TableRowFlow;
-use crate::table_rowgroup::TableRowGroupFlow;
-use crate::table_wrapper::TableWrapperFlow;
-use crate::text::TextRunScanner;
-use crate::traversal::PostorderNodeMutTraversal;
-use crate::wrapper::{LayoutNodeLayoutData, TextContent, ThreadSafeLayoutNodeHelpers};
-use crate::ServoArc;
+use std::collections::LinkedList;
+use std::marker::PhantomData;
+use std::mem;
+use std::sync::atomic::Ordering;
+use std::sync::Arc;
+
+use html5ever::{local_name, namespace_url, ns};
+use log::debug;
 use script_layout_interface::wrapper_traits::{
     PseudoElementType, ThreadSafeLayoutElement, ThreadSafeLayoutNode,
 };
 use script_layout_interface::{LayoutElementType, LayoutNodeType};
 use servo_config::opts;
 use servo_url::ServoUrl;
-use std::collections::LinkedList;
-use std::marker::PhantomData;
-use std::mem;
-use std::sync::atomic::Ordering;
-use std::sync::Arc;
 use style::computed_values::caption_side::T as CaptionSide;
 use style::computed_values::display::T as Display;
 use style::computed_values::empty_cells::T as EmptyCells;
@@ -74,6 +40,39 @@ use style::servo::restyle_damage::ServoRestyleDamage;
 use style::values::computed::Image;
 use style::values::generics::counters::ContentItem;
 use style::LocalName;
+
+use crate::block::BlockFlow;
+use crate::context::{with_thread_local_font_context, LayoutContext};
+use crate::data::{LayoutData, LayoutDataFlags};
+use crate::display_list::items::OpaqueNode;
+use crate::flex::FlexFlow;
+use crate::floats::FloatKind;
+use crate::flow::{
+    AbsoluteDescendants, Flow, FlowClass, FlowFlags, GetBaseFlow, ImmutableFlowUtils,
+    MutableFlowUtils, MutableOwnedFlowUtils,
+};
+use crate::flow_ref::FlowRef;
+use crate::fragment::{
+    CanvasFragmentInfo, Fragment, FragmentFlags, GeneratedContentInfo, IframeFragmentInfo,
+    ImageFragmentInfo, InlineAbsoluteFragmentInfo, InlineAbsoluteHypotheticalFragmentInfo,
+    InlineBlockFragmentInfo, MediaFragmentInfo, SpecificFragmentInfo, SvgFragmentInfo,
+    TableColumnFragmentInfo, UnscannedTextFragmentInfo, WhitespaceStrippingResult,
+};
+use crate::inline::{InlineFlow, InlineFragmentNodeFlags, InlineFragmentNodeInfo};
+use crate::linked_list::prepend_from;
+use crate::list_item::{ListItemFlow, ListStyleTypeContent};
+use crate::multicol::{MulticolColumnFlow, MulticolFlow};
+use crate::table::TableFlow;
+use crate::table_caption::TableCaptionFlow;
+use crate::table_cell::TableCellFlow;
+use crate::table_colgroup::TableColGroupFlow;
+use crate::table_row::TableRowFlow;
+use crate::table_rowgroup::TableRowGroupFlow;
+use crate::table_wrapper::TableWrapperFlow;
+use crate::text::TextRunScanner;
+use crate::traversal::PostorderNodeMutTraversal;
+use crate::wrapper::{LayoutNodeLayoutData, TextContent, ThreadSafeLayoutNodeHelpers};
+use crate::{parallel, ServoArc};
 
 /// The results of flow construction for a DOM node.
 #[derive(Clone)]
@@ -806,7 +805,7 @@ where
                 .stylist
                 .style_for_anonymous::<ConcreteThreadSafeLayoutNode::ConcreteElement>(
                     &context.guards,
-                    &PseudoElement::ServoText,
+                    &PseudoElement::ServoLegacyText,
                     &style,
                 );
             if node_is_input_or_text_area {
@@ -814,7 +813,7 @@ where
                     .stylist
                     .style_for_anonymous::<ConcreteThreadSafeLayoutNode::ConcreteElement>(
                         &context.guards,
-                        &PseudoElement::ServoInputText,
+                        &PseudoElement::ServoLegacyInputText,
                         &style,
                     )
             }
@@ -1117,7 +1116,7 @@ where
                     .stylist
                     .style_for_anonymous::<ConcreteThreadSafeLayoutNode::ConcreteElement>(
                         &context.guards,
-                        &PseudoElement::ServoText,
+                        &PseudoElement::ServoLegacyText,
                         &style,
                     ),
                 node.restyle_damage(),
@@ -1134,7 +1133,7 @@ where
                     .stylist
                     .style_for_anonymous::<ConcreteThreadSafeLayoutNode::ConcreteElement>(
                         &context.guards,
-                        &PseudoElement::ServoText,
+                        &PseudoElement::ServoLegacyText,
                         &style,
                     );
                 self.create_fragments_for_node_text_content(&mut fragments, node, &text_style)
@@ -1177,7 +1176,7 @@ where
             .stylist
             .style_for_anonymous::<ConcreteThreadSafeLayoutNode::ConcreteElement>(
                 &context.guards,
-                &PseudoElement::ServoInlineBlockWrapper,
+                &PseudoElement::ServoLegacyInlineBlockWrapper,
                 &style,
             );
         let fragment_info =
@@ -1228,7 +1227,7 @@ where
             .stylist
             .style_for_anonymous::<ConcreteThreadSafeLayoutNode::ConcreteElement>(
                 &style_context.guards,
-                &PseudoElement::ServoInlineAbsolute,
+                &PseudoElement::ServoLegacyInlineAbsolute,
                 &style,
             );
         let fragment = Fragment::from_opaque_node_and_style(
@@ -1373,7 +1372,7 @@ where
                 .stylist
                 .style_for_anonymous::<ConcreteThreadSafeLayoutNode::ConcreteElement>(
                     &context.guards,
-                    &PseudoElement::ServoTableWrapper,
+                    &PseudoElement::ServoLegacyTableWrapper,
                     &table_style,
                 );
         }
@@ -2190,7 +2189,7 @@ where
     )));
     let text_style = context.stylist.style_for_anonymous::<E>(
         &context.guards,
-        &PseudoElement::ServoText,
+        &PseudoElement::ServoLegacyText,
         &node.style,
     );
 
@@ -2209,14 +2208,15 @@ fn has_padding_or_border(values: &ComputedValues) -> bool {
     let padding = values.get_padding();
     let border = values.get_border();
 
+    use style::Zero;
     !padding.padding_top.is_definitely_zero() ||
         !padding.padding_right.is_definitely_zero() ||
         !padding.padding_bottom.is_definitely_zero() ||
         !padding.padding_left.is_definitely_zero() ||
-        border.border_top_width.px() != 0. ||
-        border.border_right_width.px() != 0. ||
-        border.border_bottom_width.px() != 0. ||
-        border.border_left_width.px() != 0.
+        !border.border_top_width.is_zero() ||
+        !border.border_right_width.is_zero() ||
+        !border.border_bottom_width.is_zero() ||
+        !border.border_left_width.is_zero()
 }
 
 /// Maintains a stack of anonymous boxes needed to ensure that the flow tree is *legal*. The tree
@@ -2318,7 +2318,7 @@ impl Legalizer {
                 let mut block_wrapper = Legalizer::create_anonymous_flow::<E, _>(
                     context,
                     parent,
-                    &[PseudoElement::ServoAnonymousBlock],
+                    &[PseudoElement::ServoLegacyAnonymousBlock],
                     SpecificFragmentInfo::Generic,
                     BlockFlow::from_fragment,
                 );
@@ -2379,21 +2379,21 @@ impl Legalizer {
             FlowClass::TableRow => self.push_new_anonymous_flow::<E, _>(
                 context,
                 parent,
-                &[PseudoElement::ServoAnonymousTableCell],
+                &[PseudoElement::ServoLegacyAnonymousTableCell],
                 SpecificFragmentInfo::TableCell,
                 TableCellFlow::from_fragment,
             ),
             FlowClass::Table | FlowClass::TableRowGroup => self.push_new_anonymous_flow::<E, _>(
                 context,
                 parent,
-                &[PseudoElement::ServoAnonymousTableRow],
+                &[PseudoElement::ServoLegacyAnonymousTableRow],
                 SpecificFragmentInfo::TableRow,
                 TableRowFlow::from_fragment,
             ),
             FlowClass::TableWrapper => self.push_new_anonymous_flow::<E, _>(
                 context,
                 parent,
-                &[PseudoElement::ServoAnonymousTable],
+                &[PseudoElement::ServoLegacyAnonymousTable],
                 SpecificFragmentInfo::Table,
                 TableFlow::from_fragment,
             ),
@@ -2401,8 +2401,8 @@ impl Legalizer {
                 context,
                 parent,
                 &[
-                    PseudoElement::ServoTableWrapper,
-                    PseudoElement::ServoAnonymousTableWrapper,
+                    PseudoElement::ServoLegacyTableWrapper,
+                    PseudoElement::ServoLegacyAnonymousTableWrapper,
                 ],
                 SpecificFragmentInfo::TableWrapper,
                 TableWrapperFlow::from_fragment,

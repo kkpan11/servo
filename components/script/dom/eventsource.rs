@@ -2,6 +2,30 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
+use std::cell::Cell;
+use std::mem;
+use std::str::{Chars, FromStr};
+use std::sync::{Arc, Mutex};
+
+use dom_struct::dom_struct;
+use euclid::Length;
+use headers::ContentType;
+use http::header::{self, HeaderName, HeaderValue};
+use ipc_channel::ipc;
+use ipc_channel::router::ROUTER;
+use js::conversions::ToJSValConvertible;
+use js::jsval::UndefinedValue;
+use js::rust::HandleObject;
+use mime::{self, Mime};
+use net_traits::request::{CacheMode, CorsSettings, Destination, RequestBuilder};
+use net_traits::{
+    CoreResourceMsg, FetchChannels, FetchMetadata, FetchResponseListener, FetchResponseMsg,
+    FilteredMetadata, NetworkError, ResourceFetchTiming, ResourceTimingType,
+};
+use servo_atoms::Atom;
+use servo_url::ServoUrl;
+use utf8;
+
 use crate::dom::bindings::cell::DomRefCell;
 use crate::dom::bindings::codegen::Bindings::EventSourceBinding::{
     EventSourceInit, EventSourceMethods,
@@ -22,27 +46,6 @@ use crate::network_listener::{self, NetworkListener, PreInvoke, ResourceTimingLi
 use crate::realms::enter_realm;
 use crate::task_source::{TaskSource, TaskSourceName};
 use crate::timers::OneshotTimerCallback;
-use dom_struct::dom_struct;
-use euclid::Length;
-use headers::ContentType;
-use http::header::{self, HeaderName, HeaderValue};
-use ipc_channel::ipc;
-use ipc_channel::router::ROUTER;
-use js::conversions::ToJSValConvertible;
-use js::jsval::UndefinedValue;
-use js::rust::HandleObject;
-use mime::{self, Mime};
-use net_traits::request::{CacheMode, CorsSettings, Destination, RequestBuilder};
-use net_traits::{CoreResourceMsg, FetchChannels, FetchMetadata, FilteredMetadata};
-use net_traits::{FetchResponseListener, FetchResponseMsg, NetworkError};
-use net_traits::{ResourceFetchTiming, ResourceTimingType};
-use servo_atoms::Atom;
-use servo_url::ServoUrl;
-use std::cell::Cell;
-use std::mem;
-use std::str::{Chars, FromStr};
-use std::sync::{Arc, Mutex};
-use utf8;
 
 const DEFAULT_RECONNECTION_TIME: u64 = 5000;
 
@@ -60,7 +63,9 @@ enum ReadyState {
 #[dom_struct]
 pub struct EventSource {
     eventtarget: EventTarget,
+    #[no_trace]
     url: ServoUrl,
+    #[no_trace]
     request: DomRefCell<Option<RequestBuilder>>,
     last_event_id: DomRefCell<DOMString>,
     reconnection_time: Cell<u64>,
@@ -647,6 +652,7 @@ pub struct EventSourceTimeoutCallback {
     #[ignore_malloc_size_of = "Because it is non-owning"]
     event_source: Trusted<EventSource>,
     #[ignore_malloc_size_of = "Because it is non-owning"]
+    #[no_trace]
     action_sender: ipc::IpcSender<FetchResponseMsg>,
 }
 

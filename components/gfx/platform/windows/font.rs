@@ -6,25 +6,26 @@
 // information for an approach that we'll likely need to take when the
 // renderer moves to a sandboxed process.
 
-use crate::font::{FontHandleMethods, FontMetrics, FontTableMethods};
-use crate::font::{FontTableTag, FractionalPixel};
+use std::fmt;
+use std::ops::Deref;
+use std::sync::Arc;
+
+use app_units::Au;
+use dwrote::{Font, FontFace, FontFile, FontStretch, FontStyle};
+use log::debug;
+use servo_atoms::Atom;
+use style::computed_values::font_stretch::T as StyleFontStretch;
+use style::computed_values::font_weight::T as StyleFontWeight;
+use style::values::computed::font::FontStyle as StyleFontStyle;
+use style::values::specified::font::FontStretchKeyword;
+
+use crate::font::{
+    FontHandleMethods, FontMetrics, FontTableMethods, FontTableTag, FractionalPixel,
+};
 use crate::platform::font_template::FontTemplateData;
 use crate::platform::windows::font_context::FontContextHandle;
 use crate::platform::windows::font_list::font_from_atom;
 use crate::text::glyph::GlyphId;
-use app_units::Au;
-use dwrote::{Font, FontFace, FontFile};
-use dwrote::{FontStretch, FontStyle};
-use servo_atoms::Atom;
-use std::fmt;
-use std::ops::Deref;
-use std::sync::Arc;
-use style::computed_values::font_stretch::T as StyleFontStretch;
-use style::computed_values::font_weight::T as StyleFontWeight;
-use style::values::computed::font::FontStyle as StyleFontStyle;
-use style::values::generics::font::FontStyle as GenericFontStyle;
-use style::values::generics::NonNegative;
-use style::values::specified::font::FontStretchKeyword;
 
 // 1em = 12pt = 16px, assuming 72 points per inch and 96 px per inch
 fn pt_to_px(pt: f64) -> f64 {
@@ -87,6 +88,7 @@ impl FontInfo {
         use std::cmp::{max, min};
         use std::collections::HashMap;
         use std::io::Cursor;
+
         use truetype::naming_table::{NameID, NamingTable};
         use truetype::{Value, WindowsMetrics};
 
@@ -136,28 +138,26 @@ impl FontInfo {
             },
         };
 
-        let weight = StyleFontWeight(weight_val as f32);
+        let weight = StyleFontWeight::from_float(weight_val as f32);
 
-        let stretch = StyleFontStretch(NonNegative(
-            match min(9, max(1, width_val)) {
-                1 => FontStretchKeyword::UltraCondensed,
-                2 => FontStretchKeyword::ExtraCondensed,
-                3 => FontStretchKeyword::Condensed,
-                4 => FontStretchKeyword::SemiCondensed,
-                5 => FontStretchKeyword::Normal,
-                6 => FontStretchKeyword::SemiExpanded,
-                7 => FontStretchKeyword::Expanded,
-                8 => FontStretchKeyword::ExtraExpanded,
-                9 => FontStretchKeyword::UltraExpanded,
-                _ => return Err(()),
-            }
-            .compute(),
-        ));
+        let stretch = match min(9, max(1, width_val)) {
+            1 => FontStretchKeyword::UltraCondensed,
+            2 => FontStretchKeyword::ExtraCondensed,
+            3 => FontStretchKeyword::Condensed,
+            4 => FontStretchKeyword::SemiCondensed,
+            5 => FontStretchKeyword::Normal,
+            6 => FontStretchKeyword::SemiExpanded,
+            7 => FontStretchKeyword::Expanded,
+            8 => FontStretchKeyword::ExtraExpanded,
+            9 => FontStretchKeyword::UltraExpanded,
+            _ => return Err(()),
+        }
+        .compute();
 
         let style = if italic_bool {
-            GenericFontStyle::Italic
+            StyleFontStyle::ITALIC
         } else {
-            GenericFontStyle::Normal
+            StyleFontStyle::NORMAL
         };
 
         Ok(FontInfo {
@@ -171,26 +171,24 @@ impl FontInfo {
 
     fn new_from_font(font: &Font) -> Result<FontInfo, ()> {
         let style = match font.style() {
-            FontStyle::Normal => GenericFontStyle::Normal,
-            FontStyle::Oblique => GenericFontStyle::Oblique(StyleFontStyle::default_angle()),
-            FontStyle::Italic => GenericFontStyle::Italic,
+            FontStyle::Normal => StyleFontStyle::NORMAL,
+            FontStyle::Oblique => StyleFontStyle::OBLIQUE,
+            FontStyle::Italic => StyleFontStyle::ITALIC,
         };
-        let weight = StyleFontWeight(font.weight().to_u32() as f32);
-        let stretch = StyleFontStretch(NonNegative(
-            match font.stretch() {
-                FontStretch::Undefined => FontStretchKeyword::Normal,
-                FontStretch::UltraCondensed => FontStretchKeyword::UltraCondensed,
-                FontStretch::ExtraCondensed => FontStretchKeyword::ExtraCondensed,
-                FontStretch::Condensed => FontStretchKeyword::Condensed,
-                FontStretch::SemiCondensed => FontStretchKeyword::SemiCondensed,
-                FontStretch::Normal => FontStretchKeyword::Normal,
-                FontStretch::SemiExpanded => FontStretchKeyword::SemiExpanded,
-                FontStretch::Expanded => FontStretchKeyword::Expanded,
-                FontStretch::ExtraExpanded => FontStretchKeyword::ExtraExpanded,
-                FontStretch::UltraExpanded => FontStretchKeyword::UltraExpanded,
-            }
-            .compute(),
-        ));
+        let weight = StyleFontWeight::from_float(font.weight().to_u32() as f32);
+        let stretch = match font.stretch() {
+            FontStretch::Undefined => FontStretchKeyword::Normal,
+            FontStretch::UltraCondensed => FontStretchKeyword::UltraCondensed,
+            FontStretch::ExtraCondensed => FontStretchKeyword::ExtraCondensed,
+            FontStretch::Condensed => FontStretchKeyword::Condensed,
+            FontStretch::SemiCondensed => FontStretchKeyword::SemiCondensed,
+            FontStretch::Normal => FontStretchKeyword::Normal,
+            FontStretch::SemiExpanded => FontStretchKeyword::SemiExpanded,
+            FontStretch::Expanded => FontStretchKeyword::Expanded,
+            FontStretch::ExtraExpanded => FontStretchKeyword::ExtraExpanded,
+            FontStretch::UltraExpanded => FontStretchKeyword::UltraExpanded,
+        }
+        .compute();
 
         Ok(FontInfo {
             family_name: font.family_name(),

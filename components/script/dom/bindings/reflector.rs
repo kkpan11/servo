@@ -4,6 +4,11 @@
 
 //! The `Reflector` struct.
 
+use std::default::Default;
+
+use js::jsapi::{Heap, JSObject};
+use js::rust::HandleObject;
+
 use crate::dom::bindings::conversions::DerivedFrom;
 use crate::dom::bindings::iterable::{Iterable, IterableIterator};
 use crate::dom::bindings::root::{Dom, DomRoot, Root};
@@ -11,9 +16,6 @@ use crate::dom::bindings::trace::JSTraceable;
 use crate::dom::globalscope::GlobalScope;
 use crate::realms::AlreadyInRealm;
 use crate::script_runtime::JSContext;
-use js::jsapi::{Heap, JSObject};
-use js::rust::HandleObject;
-use std::default::Default;
 
 /// Create the reflector for a new DOM object and yield ownership to the
 /// reflector.
@@ -40,16 +42,16 @@ where
 }
 
 /// A struct to store a reference to the reflector of a DOM object.
-#[allow(unrooted_must_root)]
+#[allow(crown::unrooted_must_root)]
 #[derive(MallocSizeOf)]
-#[unrooted_must_root_lint::must_root]
+#[crown::unrooted_must_root_lint::must_root]
 // If you're renaming or moving this field, update the path in plugins::reflector as well
 pub struct Reflector {
     #[ignore_malloc_size_of = "defined and measured in rust-mozjs"]
     object: Heap<*mut JSObject>,
 }
 
-#[allow(unrooted_must_root)]
+#[allow(crown::unrooted_must_root)]
 impl PartialEq for Reflector {
     fn eq(&self, other: &Reflector) -> bool {
         self.object.get() == other.object.get()

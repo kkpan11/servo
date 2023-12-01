@@ -2,6 +2,20 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
+use dom_struct::dom_struct;
+use html5ever::local_name;
+use servo_arc::Arc;
+use servo_url::ServoUrl;
+use style::attr::AttrValue;
+use style::properties::{
+    parse_one_declaration_into, parse_style_attribute, Importance, LonghandId,
+    PropertyDeclarationBlock, PropertyId, ShorthandId, SourcePropertyDeclaration,
+};
+use style::selector_parser::PseudoElement;
+use style::shared_lock::Locked;
+use style::stylesheets::{CssRuleType, Origin};
+use style_traits::ParsingMode;
+
 use crate::dom::bindings::codegen::Bindings::CSSStyleDeclarationBinding::CSSStyleDeclarationMethods;
 use crate::dom::bindings::codegen::Bindings::WindowBinding::WindowMethods;
 use crate::dom::bindings::error::{Error, ErrorResult, Fallible};
@@ -13,20 +27,6 @@ use crate::dom::cssrule::CSSRule;
 use crate::dom::element::Element;
 use crate::dom::node::{document_from_node, stylesheets_owner_from_node, window_from_node, Node};
 use crate::dom::window::Window;
-use dom_struct::dom_struct;
-use servo_arc::Arc;
-use servo_url::ServoUrl;
-use style::attr::AttrValue;
-use style::properties::{
-    parse_one_declaration_into, parse_style_attribute, SourcePropertyDeclaration,
-};
-use style::properties::{
-    Importance, LonghandId, PropertyDeclarationBlock, PropertyId, ShorthandId,
-};
-use style::selector_parser::PseudoElement;
-use style::shared_lock::Locked;
-use style::stylesheets::{CssRuleType, Origin};
-use style_traits::ParsingMode;
 
 // http://dev.w3.org/csswg/cssom/#the-cssstyledeclaration-interface
 #[dom_struct]
@@ -34,16 +34,19 @@ pub struct CSSStyleDeclaration {
     reflector_: Reflector,
     owner: CSSStyleOwner,
     readonly: bool,
+    #[no_trace]
     pseudo: Option<PseudoElement>,
 }
 
 #[derive(JSTraceable, MallocSizeOf)]
-#[unrooted_must_root_lint::must_root]
+#[crown::unrooted_must_root_lint::must_root]
 pub enum CSSStyleOwner {
     Element(Dom<Element>),
     CSSRule(
         Dom<CSSRule>,
-        #[ignore_malloc_size_of = "Arc"] Arc<Locked<PropertyDeclarationBlock>>,
+        #[ignore_malloc_size_of = "Arc"]
+        #[no_trace]
+        Arc<Locked<PropertyDeclarationBlock>>,
     ),
 }
 
@@ -206,7 +209,7 @@ fn remove_property(decls: &mut PropertyDeclarationBlock, id: &PropertyId) -> boo
 }
 
 impl CSSStyleDeclaration {
-    #[allow(unrooted_must_root)]
+    #[allow(crown::unrooted_must_root)]
     pub fn new_inherited(
         owner: CSSStyleOwner,
         pseudo: Option<PseudoElement>,
@@ -220,7 +223,7 @@ impl CSSStyleDeclaration {
         }
     }
 
-    #[allow(unrooted_must_root)]
+    #[allow(crown::unrooted_must_root)]
     pub fn new(
         global: &Window,
         owner: CSSStyleOwner,
@@ -298,7 +301,7 @@ impl CSSStyleDeclaration {
             // Step 5
             let window = self.owner.window();
             let quirks_mode = window.Document().quirks_mode();
-            let mut declarations = SourcePropertyDeclaration::new();
+            let mut declarations = SourcePropertyDeclaration::default();
             let result = parse_one_declaration_into(
                 &mut declarations,
                 id,
@@ -472,5 +475,5 @@ impl CSSStyleDeclarationMethods for CSSStyleDeclaration {
     }
 
     // https://drafts.csswg.org/cssom/#dom-cssstyledeclaration-_camel_cased_attribute
-    css_properties_accessors!(css_properties);
+    style::css_properties_accessors!(css_properties);
 }

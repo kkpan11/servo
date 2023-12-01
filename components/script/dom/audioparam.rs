@@ -2,6 +2,14 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
+use std::cell::Cell;
+use std::sync::mpsc;
+
+use dom_struct::dom_struct;
+use servo_media::audio::graph::NodeId;
+use servo_media::audio::node::AudioNodeMessage;
+use servo_media::audio::param::{ParamRate, ParamType, RampKind, UserAutomationEvent};
+
 use crate::dom::baseaudiocontext::BaseAudioContext;
 use crate::dom::bindings::codegen::Bindings::AudioParamBinding::{
     AudioParamMethods, AutomationRate,
@@ -11,20 +19,16 @@ use crate::dom::bindings::num::Finite;
 use crate::dom::bindings::reflector::{reflect_dom_object, Reflector};
 use crate::dom::bindings::root::{Dom, DomRoot};
 use crate::dom::window::Window;
-use dom_struct::dom_struct;
-use servo_media::audio::graph::NodeId;
-use servo_media::audio::node::AudioNodeMessage;
-use servo_media::audio::param::{ParamRate, ParamType, RampKind, UserAutomationEvent};
-use std::cell::Cell;
-use std::sync::mpsc;
 
 #[dom_struct]
 pub struct AudioParam {
     reflector_: Reflector,
     context: Dom<BaseAudioContext>,
     #[ignore_malloc_size_of = "servo_media"]
+    #[no_trace]
     node: NodeId,
     #[ignore_malloc_size_of = "servo_media"]
+    #[no_trace]
     param: ParamType,
     automation_rate: Cell<AutomationRate>,
     default_value: f32,
@@ -54,7 +58,7 @@ impl AudioParam {
         }
     }
 
-    #[allow(unrooted_must_root)]
+    #[allow(crown::unrooted_must_root)]
     pub fn new(
         window: &Window,
         context: &BaseAudioContext,

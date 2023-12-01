@@ -2,6 +2,15 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
+use std::convert::TryInto;
+
+use serde::Serialize;
+use servo_arc::Arc;
+use style::logical_geometry::WritingMode;
+use style::properties::ComputedValues;
+use style::values::computed::Length;
+use style::values::specified::text::TextDecorationLine;
+
 use crate::context::LayoutContext;
 use crate::dom::NodeExt;
 use crate::dom_traversal::{Contents, NodeAndStyleInfo};
@@ -13,12 +22,6 @@ use crate::replaced::ReplacedContent;
 use crate::sizing::{self, ContentSizes};
 use crate::style_ext::DisplayInside;
 use crate::ContainingBlock;
-use servo_arc::Arc;
-use std::convert::TryInto;
-use style::logical_geometry::WritingMode;
-use style::properties::ComputedValues;
-use style::values::computed::{Length, Percentage};
-use style::values::specified::text::TextDecorationLine;
 
 /// https://drafts.csswg.org/css-display/#independent-formatting-context
 #[derive(Debug, Serialize)]
@@ -151,25 +154,12 @@ impl IndependentFormattingContext {
         layout_context: &LayoutContext,
         containing_block_writing_mode: WritingMode,
     ) -> ContentSizes {
-        let (mut outer, percentages) = self.outer_inline_content_sizes_and_percentages(
-            layout_context,
-            containing_block_writing_mode,
-        );
-        outer.adjust_for_pbm_percentages(percentages);
-        outer
-    }
-
-    pub fn outer_inline_content_sizes_and_percentages(
-        &mut self,
-        layout_context: &LayoutContext,
-        containing_block_writing_mode: WritingMode,
-    ) -> (ContentSizes, Percentage) {
         match self {
             Self::NonReplaced(non_replaced) => {
                 let style = &non_replaced.style;
                 let content_sizes = &mut non_replaced.content_sizes;
                 let contents = &non_replaced.contents;
-                sizing::outer_inline_and_percentages(&style, containing_block_writing_mode, || {
+                sizing::outer_inline(&style, containing_block_writing_mode, || {
                     content_sizes
                         .get_or_insert_with(|| {
                             contents.inline_content_sizes(layout_context, style.writing_mode)
@@ -177,11 +167,11 @@ impl IndependentFormattingContext {
                         .clone()
                 })
             },
-            Self::Replaced(replaced) => sizing::outer_inline_and_percentages(
-                &replaced.style,
-                containing_block_writing_mode,
-                || replaced.contents.inline_content_sizes(&replaced.style),
-            ),
+            Self::Replaced(replaced) => {
+                sizing::outer_inline(&replaced.style, containing_block_writing_mode, || {
+                    replaced.contents.inline_content_sizes(&replaced.style)
+                })
+            },
         }
     }
 }

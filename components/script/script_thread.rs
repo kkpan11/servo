@@ -17,7 +17,86 @@
 //! a page runs its course and the script thread returns to processing events in the main event
 //! loop.
 
-use crate::devtools;
+use std::borrow::Cow;
+use std::cell::{Cell, RefCell};
+use std::collections::{hash_map, HashMap, HashSet};
+use std::default::Default;
+use std::ops::Deref;
+use std::option::Option;
+use std::rc::Rc;
+use std::result::Result;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use std::time::{Duration, SystemTime};
+use std::{ptr, thread};
+
+use bluetooth_traits::BluetoothRequest;
+use canvas_traits::webgl::WebGLPipeline;
+use crossbeam_channel::{select, unbounded, Receiver, Sender};
+use devtools_traits::{
+    CSSError, DevtoolScriptControlMsg, DevtoolsPageInfo, NavigationState,
+    ScriptToDevtoolsControlMsg, WorkerId,
+};
+use embedder_traits::EmbedderMsg;
+use euclid::default::{Point2D, Rect};
+use euclid::Vector2D;
+use headers::{HeaderMapExt, LastModified, ReferrerPolicy as ReferrerPolicyHeader};
+use html5ever::{local_name, namespace_url, ns};
+use hyper_serde::Serde;
+use ipc_channel::ipc::{self, IpcSender};
+use ipc_channel::router::ROUTER;
+use js::glue::GetWindowProxyClass;
+use js::jsapi::{
+    JSContext as UnsafeJSContext, JSTracer, JS_AddInterruptCallback, SetWindowProxyClass,
+};
+use js::jsval::UndefinedValue;
+use js::rust::ParentRuntime;
+use media::WindowGLContext;
+use metrics::{PaintTimeMetrics, MAX_TASK_NS};
+use mime::{self, Mime};
+use msg::constellation_msg::{
+    BackgroundHangMonitor, BackgroundHangMonitorExitSignal, BackgroundHangMonitorRegister,
+    BrowsingContextId, HangAnnotation, HistoryStateId, MonitoredComponentId,
+    MonitoredComponentType, PipelineId, PipelineNamespace, ScriptHangAnnotation,
+    TopLevelBrowsingContextId,
+};
+use net_traits::image_cache::{ImageCache, PendingImageResponse};
+use net_traits::request::{CredentialsMode, Destination, RedirectMode, RequestBuilder};
+use net_traits::storage_thread::StorageType;
+use net_traits::{
+    FetchMetadata, FetchResponseListener, FetchResponseMsg, Metadata, NetworkError, ReferrerPolicy,
+    ResourceFetchTiming, ResourceThreads, ResourceTimingType,
+};
+use parking_lot::Mutex;
+use percent_encoding::percent_decode;
+use profile_traits::mem::{self as profile_mem, OpaqueSender, ReportsChan};
+use profile_traits::time::{self as profile_time, profile, ProfilerCategory};
+use script_layout_interface::message::{self, LayoutThreadInit, Msg, ReflowGoal};
+use script_traits::webdriver_msg::WebDriverScriptCommand;
+use script_traits::CompositorEvent::{
+    CompositionEvent, IMEDismissedEvent, KeyboardEvent, MouseButtonEvent, MouseMoveEvent,
+    ResizeEvent, TouchEvent, WheelEvent,
+};
+use script_traits::{
+    AnimationTickType, CompositorEvent, ConstellationControlMsg, DiscardBrowsingContext,
+    DocumentActivity, EventResult, HistoryEntryReplacement, InitialScriptState, JsEvalResult,
+    LayoutMsg, LoadData, LoadOrigin, MediaSessionActionType, MouseButton, MouseEventType,
+    NewLayoutInfo, Painter, ProgressiveWebMetricType, ScriptMsg, ScriptThreadFactory,
+    ScriptToConstellationChan, StructuredSerializedData, TimerSchedulerMsg, TouchEventType,
+    TouchId, UntrustedNodeAddress, UpdatePipelineIdReason, WebrenderIpcSender, WheelDelta,
+    WindowSizeData, WindowSizeType,
+};
+use servo_atoms::Atom;
+use servo_config::opts;
+use servo_url::{ImmutableOrigin, MutableOrigin, ServoUrl};
+use style::dom::OpaqueNode;
+use style::thread_state::{self, ThreadState};
+use time::{at_utc, get_time, precise_time_ns, Timespec};
+use url::Position;
+use webgpu::identity::WebGPUMsg;
+use webrender_api::units::LayoutPixel;
+use webrender_api::DocumentId;
+
 use crate::document_loader::DocumentLoader;
 use crate::dom::bindings::cell::DomRefCell;
 use crate::dom::bindings::codegen::Bindings::DocumentBinding::{
@@ -31,10 +110,11 @@ use crate::dom::bindings::conversions::{
 use crate::dom::bindings::inheritance::Castable;
 use crate::dom::bindings::refcounted::Trusted;
 use crate::dom::bindings::reflector::DomObject;
-use crate::dom::bindings::root::ThreadLocalStackRoots;
-use crate::dom::bindings::root::{Dom, DomRoot, MutNullableDom, RootCollection};
+use crate::dom::bindings::root::{
+    Dom, DomRoot, MutNullableDom, RootCollection, ThreadLocalStackRoots,
+};
 use crate::dom::bindings::str::DOMString;
-use crate::dom::bindings::trace::JSTraceable;
+use crate::dom::bindings::trace::{HashMapTracedValues, JSTraceable};
 use crate::dom::customelementregistry::{
     CallbackReaction, CustomElementDefinition, CustomElementReactionStack,
 };
@@ -64,9 +144,9 @@ use crate::microtask::{Microtask, MicrotaskQueue};
 use crate::realms::enter_realm;
 use crate::script_module::ScriptFetchOptions;
 use crate::script_runtime::{
-    get_reports, new_rt_and_cx, ContextForRequestInterrupt, JSContext, Runtime, ScriptPort,
+    get_reports, new_rt_and_cx, CommonScriptMsg, ContextForRequestInterrupt, JSContext, Runtime,
+    ScriptChan, ScriptPort, ScriptThreadEventCategory,
 };
-use crate::script_runtime::{CommonScriptMsg, ScriptChan, ScriptThreadEventCategory};
 use crate::task_manager::TaskManager;
 use crate::task_queue::{QueuedTask, QueuedTaskConversion, TaskQueue};
 use crate::task_source::dom_manipulation::DOMManipulationTaskSource;
@@ -80,90 +160,8 @@ use crate::task_source::remote_event::RemoteEventTaskSource;
 use crate::task_source::timer::TimerTaskSource;
 use crate::task_source::user_interaction::UserInteractionTaskSource;
 use crate::task_source::websocket::WebsocketTaskSource;
-use crate::task_source::TaskSource;
-use crate::task_source::TaskSourceName;
-use crate::webdriver_handlers;
-use bluetooth_traits::BluetoothRequest;
-use canvas_traits::webgl::WebGLPipeline;
-use crossbeam_channel::{unbounded, Receiver, Sender};
-use devtools_traits::CSSError;
-use devtools_traits::{DevtoolScriptControlMsg, DevtoolsPageInfo};
-use devtools_traits::{NavigationState, ScriptToDevtoolsControlMsg, WorkerId};
-use embedder_traits::{EmbedderMsg, EventLoopWaker};
-use euclid::default::{Point2D, Rect};
-use euclid::Vector2D;
-use headers::ReferrerPolicy as ReferrerPolicyHeader;
-use headers::{HeaderMapExt, LastModified};
-use hyper_serde::Serde;
-use ipc_channel::ipc::{self, IpcSender};
-use ipc_channel::router::ROUTER;
-use js::glue::GetWindowProxyClass;
-use js::jsapi::{
-    JSContext as UnsafeJSContext, JSTracer, JS_AddInterruptCallback, SetWindowProxyClass,
-};
-use js::jsval::UndefinedValue;
-use js::rust::ParentRuntime;
-use media::WindowGLContext;
-use metrics::{PaintTimeMetrics, MAX_TASK_NS};
-use mime::{self, Mime};
-use msg::constellation_msg::{
-    BackgroundHangMonitor, BackgroundHangMonitorExitSignal, BackgroundHangMonitorRegister,
-    ScriptHangAnnotation,
-};
-use msg::constellation_msg::{BrowsingContextId, HistoryStateId, PipelineId};
-use msg::constellation_msg::{HangAnnotation, MonitoredComponentId, MonitoredComponentType};
-use msg::constellation_msg::{PipelineNamespace, TopLevelBrowsingContextId};
-use net_traits::image_cache::{ImageCache, PendingImageResponse};
-use net_traits::request::{CredentialsMode, Destination, RedirectMode, RequestBuilder};
-use net_traits::storage_thread::StorageType;
-use net_traits::{FetchMetadata, FetchResponseListener, FetchResponseMsg};
-use net_traits::{
-    Metadata, NetworkError, ReferrerPolicy, ResourceFetchTiming, ResourceThreads,
-    ResourceTimingType,
-};
-use parking_lot::Mutex;
-use percent_encoding::percent_decode;
-use profile_traits::mem::{self as profile_mem, OpaqueSender, ReportsChan};
-use profile_traits::time::{self as profile_time, profile, ProfilerCategory};
-use script_layout_interface::message::{self, LayoutThreadInit, Msg, ReflowGoal};
-use script_traits::webdriver_msg::WebDriverScriptCommand;
-use script_traits::CompositorEvent::{
-    CompositionEvent, IMEDismissedEvent, KeyboardEvent, MouseButtonEvent, MouseMoveEvent,
-    ResizeEvent, TouchEvent, WheelEvent,
-};
-use script_traits::{
-    AnimationTickType, CompositorEvent, ConstellationControlMsg, DiscardBrowsingContext,
-    DocumentActivity, EventResult, HistoryEntryReplacement, InitialScriptState, JsEvalResult,
-    LayoutMsg, LoadData, LoadOrigin, MediaSessionActionType, MouseButton, MouseEventType,
-    NewLayoutInfo, Painter, ProgressiveWebMetricType, ScriptMsg, ScriptThreadFactory,
-    ScriptToConstellationChan, StructuredSerializedData, TimerSchedulerMsg, TouchEventType,
-    TouchId, UntrustedNodeAddress, UpdatePipelineIdReason, WebrenderIpcSender, WheelDelta,
-    WindowSizeData, WindowSizeType,
-};
-use servo_atoms::Atom;
-use servo_config::opts;
-use servo_url::{ImmutableOrigin, MutableOrigin, ServoUrl};
-use std::borrow::Cow;
-use std::cell::Cell;
-use std::cell::RefCell;
-use std::collections::{hash_map, HashMap, HashSet};
-use std::default::Default;
-use std::ops::Deref;
-use std::option::Option;
-use std::ptr;
-use std::rc::Rc;
-use std::result::Result;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
-use std::thread;
-use std::time::{Duration, SystemTime};
-use style::dom::OpaqueNode;
-use style::thread_state::{self, ThreadState};
-use time::{at_utc, get_time, precise_time_ns, Timespec};
-use url::Position;
-use webgpu::identity::WebGPUMsg;
-use webrender_api::units::LayoutPixel;
-use webrender_api::DocumentId;
+use crate::task_source::{TaskSource, TaskSourceName};
+use crate::{devtools, webdriver_handlers};
 
 pub type ImageCacheMsg = (PipelineId, PendingImageResponse);
 
@@ -185,26 +183,36 @@ pub unsafe fn trace_thread(tr: *mut JSTracer) {
 #[derive(JSTraceable)]
 struct InProgressLoad {
     /// The pipeline which requested this load.
+    #[no_trace]
     pipeline_id: PipelineId,
     /// The browsing context being loaded into.
+    #[no_trace]
     browsing_context_id: BrowsingContextId,
     /// The top level ancestor browsing context.
+    #[no_trace]
     top_level_browsing_context_id: TopLevelBrowsingContextId,
     /// The parent pipeline and frame type associated with this load, if any.
+    #[no_trace]
     parent_info: Option<PipelineId>,
     /// The opener, if this is an auxiliary.
+    #[no_trace]
     opener: Option<BrowsingContextId>,
     /// The current window size associated with this pipeline.
+    #[no_trace]
     window_size: WindowSizeData,
     /// Channel to the layout thread associated with this pipeline.
+    #[no_trace]
     layout_chan: Sender<message::Msg>,
     /// The activity level of the document (inactive, active or fully active).
+    #[no_trace]
     activity: DocumentActivity,
     /// Window is visible.
     is_visible: bool,
     /// The requested URL of the load.
+    #[no_trace]
     url: ServoUrl,
     /// The origin for the document
+    #[no_trace]
     origin: MutableOrigin,
     /// Timestamp reporting the time when the browser started this load.
     navigation_start: u64,
@@ -398,7 +406,7 @@ impl ScriptPort for Receiver<(TrustedServiceWorkerAddress, CommonScriptMsg)> {
 
 /// Encapsulates internal communication of shared messages within the script thread.
 #[derive(JSTraceable)]
-pub struct SendableMainThreadScriptChan(pub Sender<CommonScriptMsg>);
+pub struct SendableMainThreadScriptChan(#[no_trace] pub Sender<CommonScriptMsg>);
 
 impl ScriptChan for SendableMainThreadScriptChan {
     fn send(&self, msg: CommonScriptMsg) -> Result<(), ()> {
@@ -412,7 +420,7 @@ impl ScriptChan for SendableMainThreadScriptChan {
 
 /// Encapsulates internal communication of main thread messages within the script thread.
 #[derive(JSTraceable)]
-pub struct MainThreadScriptChan(pub Sender<MainThreadScriptMsg>);
+pub struct MainThreadScriptChan(#[no_trace] pub Sender<MainThreadScriptMsg>);
 
 impl ScriptChan for MainThreadScriptChan {
     fn send(&self, msg: CommonScriptMsg) -> Result<(), ()> {
@@ -434,15 +442,15 @@ impl OpaqueSender<CommonScriptMsg> for Sender<MainThreadScriptMsg> {
 
 /// The set of all documents managed by this script thread.
 #[derive(JSTraceable)]
-#[unrooted_must_root_lint::must_root]
+#[crown::unrooted_must_root_lint::must_root]
 pub struct Documents {
-    map: HashMap<PipelineId, Dom<Document>>,
+    map: HashMapTracedValues<PipelineId, Dom<Document>>,
 }
 
 impl Documents {
     pub fn new() -> Documents {
         Documents {
-            map: HashMap::new(),
+            map: HashMapTracedValues::new(),
         }
     }
 
@@ -488,7 +496,7 @@ impl Documents {
     }
 }
 
-#[allow(unrooted_must_root)]
+#[allow(crown::unrooted_must_root)]
 pub struct DocumentsIter<'a> {
     iter: hash_map::Iter<'a, PipelineId, Dom<Document>>,
 }
@@ -511,36 +519,39 @@ impl<'a> Iterator for DocumentsIter<'a> {
 pub struct IncompleteParserContexts(RefCell<Vec<(PipelineId, ParserContext)>>);
 
 unsafe_no_jsmanaged_fields!(TaskQueue<MainThreadScriptMsg>);
-unsafe_no_jsmanaged_fields!(dyn BackgroundHangMonitorRegister);
-unsafe_no_jsmanaged_fields!(dyn BackgroundHangMonitor);
 
 #[derive(JSTraceable)]
 // ScriptThread instances are rooted on creation, so this is okay
-#[allow(unrooted_must_root)]
+#[allow(crown::unrooted_must_root)]
 pub struct ScriptThread {
     /// The documents for pipelines managed by this thread
     documents: DomRefCell<Documents>,
     /// The window proxies known by this thread
     /// TODO: this map grows, but never shrinks. Issue #15258.
-    window_proxies: DomRefCell<HashMap<BrowsingContextId, Dom<WindowProxy>>>,
+    window_proxies: DomRefCell<HashMapTracedValues<BrowsingContextId, Dom<WindowProxy>>>,
     /// A list of data pertaining to loads that have not yet received a network response
     incomplete_loads: DomRefCell<Vec<InProgressLoad>>,
     /// A vector containing parser contexts which have not yet been fully processed
     incomplete_parser_contexts: IncompleteParserContexts,
     /// Image cache for this script thread.
+    #[no_trace]
     image_cache: Arc<dyn ImageCache>,
     /// A handle to the resource thread. This is an `Arc` to avoid running out of file descriptors if
     /// there are many iframes.
+    #[no_trace]
     resource_threads: ResourceThreads,
     /// A handle to the bluetooth thread.
+    #[no_trace]
     bluetooth_thread: IpcSender<BluetoothRequest>,
 
     /// A queue of tasks to be executed in this script-thread.
     task_queue: TaskQueue<MainThreadScriptMsg>,
 
     /// A handle to register associated layout threads for hang-monitoring.
+    #[no_trace]
     background_hang_monitor_register: Box<dyn BackgroundHangMonitorRegister>,
     /// The dedicated means of communication with the background-hang-monitor for this script-thread.
+    #[no_trace]
     background_hang_monitor: Box<dyn BackgroundHangMonitor>,
     /// A flag set to `true` by the BHM on exit, and checked from within the interrupt handler.
     closing: Arc<AtomicBool>,
@@ -551,12 +562,15 @@ pub struct ScriptThread {
 
     dom_manipulation_task_sender: Box<dyn ScriptChan>,
 
+    #[no_trace]
     media_element_task_sender: Sender<MainThreadScriptMsg>,
 
+    #[no_trace]
     user_interaction_task_sender: Sender<MainThreadScriptMsg>,
 
     networking_task_sender: Box<dyn ScriptChan>,
 
+    #[no_trace]
     history_traversal_task_sender: Sender<MainThreadScriptMsg>,
 
     file_reading_task_sender: Box<dyn ScriptChan>,
@@ -570,34 +584,45 @@ pub struct ScriptThread {
     remote_event_task_sender: Box<dyn ScriptChan>,
 
     /// A channel to hand out to threads that need to respond to a message from the script thread.
+    #[no_trace]
     control_chan: IpcSender<ConstellationControlMsg>,
 
     /// The port on which the constellation and layout threads can communicate with the
     /// script thread.
+    #[no_trace]
     control_port: Receiver<ConstellationControlMsg>,
 
     /// For communicating load url messages to the constellation
+    #[no_trace]
     script_sender: IpcSender<(PipelineId, ScriptMsg)>,
 
     /// A sender for new layout threads to communicate to the constellation.
+    #[no_trace]
     layout_to_constellation_chan: IpcSender<LayoutMsg>,
 
     /// The port on which we receive messages from the image cache
+    #[no_trace]
     image_cache_port: Receiver<ImageCacheMsg>,
 
     /// The channel on which the image cache can send messages to ourself.
+    #[no_trace]
     image_cache_channel: Sender<ImageCacheMsg>,
     /// For providing contact with the time profiler.
+    #[no_trace]
     time_profiler_chan: profile_time::ProfilerChan,
 
     /// For providing contact with the memory profiler.
+    #[no_trace]
     mem_profiler_chan: profile_mem::ProfilerChan,
 
     /// For providing instructions to an optional devtools server.
+    #[no_trace]
     devtools_chan: Option<IpcSender<ScriptToDevtoolsControlMsg>>,
     /// For receiving commands from an optional devtools server. Will be ignored if
     /// no such server exists.
+    #[no_trace]
     devtools_port: Receiver<DevtoolScriptControlMsg>,
+    #[no_trace]
     devtools_sender: IpcSender<DevtoolScriptControlMsg>,
 
     /// The JavaScript runtime.
@@ -607,10 +632,13 @@ pub struct ScriptThread {
     topmost_mouse_over_target: MutNullableDom<Element>,
 
     /// List of pipelines that have been owned and closed by this script thread.
+    #[no_trace]
     closed_pipelines: DomRefCell<HashSet<PipelineId>>,
 
+    #[no_trace]
     scheduler_chan: IpcSender<TimerSchedulerMsg>,
 
+    #[no_trace]
     content_process_shutdown_chan: Sender<()>,
 
     /// <https://html.spec.whatwg.org/multipage/#microtask-queue>
@@ -623,9 +651,11 @@ pub struct ScriptThread {
     mutation_observers: DomRefCell<Vec<Dom<MutationObserver>>>,
 
     /// A handle to the WebGL thread
+    #[no_trace]
     webgl_chan: Option<WebGLPipeline>,
 
     /// The WebXR device registry
+    #[no_trace]
     webxr_registry: webxr_api::Registry,
 
     /// The worklet thread pool
@@ -639,9 +669,11 @@ pub struct ScriptThread {
     custom_element_reaction_stack: CustomElementReactionStack,
 
     /// The Webrender Document ID associated with this thread.
+    #[no_trace]
     webrender_document: DocumentId,
 
     /// Webrender API sender.
+    #[no_trace]
     webrender_api_sender: WebrenderIpcSender,
 
     /// Periodically print out on which events script threads spend their processing time.
@@ -678,10 +710,8 @@ pub struct ScriptThread {
     user_agent: Cow<'static, str>,
 
     /// Application window's GL Context for Media player
+    #[no_trace]
     player_context: WindowGLContext,
-
-    /// A mechanism to force the compositor's event loop to process events.
-    event_loop_waker: Option<Box<dyn EventLoopWaker>>,
 
     /// A set of all nodes ever created in this script thread
     node_ids: DomRefCell<HashSet<String>>,
@@ -690,9 +720,11 @@ pub struct ScriptThread {
     is_user_interacting: Cell<bool>,
 
     /// Identity manager for WebGPU resources
+    #[no_trace]
     gpu_id_hub: Arc<Mutex<Identities>>,
 
     /// Receiver to receive commands from optional WebGPU server.
+    #[no_trace]
     webgpu_port: RefCell<Option<Receiver<WebGPUMsg>>>,
 
     // Secure context
@@ -739,7 +771,7 @@ impl<'a> ScriptMemoryFailsafe<'a> {
 }
 
 impl<'a> Drop for ScriptMemoryFailsafe<'a> {
-    #[allow(unrooted_must_root)]
+    #[allow(crown::unrooted_must_root)]
     fn drop(&mut self) {
         if let Some(owner) = self.owner {
             for (_, document) in owner.documents.borrow().iter() {
@@ -762,7 +794,7 @@ impl ScriptThreadFactory for ScriptThread {
         let (sender, receiver) = unbounded();
         let layout_chan = sender.clone();
         thread::Builder::new()
-            .name(format!("Script{}", state.id))
+            .name(format!("Script{:?}", state.id))
             .spawn(move || {
                 thread_state::initialize(ThreadState::SCRIPT);
                 PipelineNamespace::install(state.pipeline_namespace_id);
@@ -804,7 +836,7 @@ impl ScriptThreadFactory for ScriptThread {
                 );
                 script_thread.pre_page_load(new_load, load_data);
 
-                let reporter_name = format!("script-reporter-{}", id);
+                let reporter_name = format!("script-reporter-{:?}", id);
                 mem_profiler_chan.run_with_memory_reporting(
                     || {
                         script_thread.start();
@@ -1297,7 +1329,7 @@ impl ScriptThread {
 
         ScriptThread {
             documents: DomRefCell::new(Documents::new()),
-            window_proxies: DomRefCell::new(HashMap::new()),
+            window_proxies: DomRefCell::new(HashMapTracedValues::new()),
             incomplete_loads: DomRefCell::new(vec![]),
             incomplete_parser_contexts: IncompleteParserContexts(RefCell::new(vec![])),
 
@@ -1378,7 +1410,6 @@ impl ScriptThread {
             replace_surrogates: opts.debug.replace_surrogates,
             user_agent,
             player_context: state.player_context,
-            event_loop_waker: state.event_loop_waker,
 
             node_ids: Default::default(),
             is_user_interacting: Cell::new(false),
@@ -1423,9 +1454,8 @@ impl ScriptThread {
 
     /// Handle incoming control messages.
     fn handle_msgs(&self) -> bool {
-        use self::MixedMessage::FromScript;
         use self::MixedMessage::{
-            FromConstellation, FromDevtools, FromImageCache, FromWebGPUServer,
+            FromConstellation, FromDevtools, FromImageCache, FromScript, FromWebGPUServer,
         };
 
         // Handle pending resize events.
@@ -2072,6 +2102,7 @@ impl ScriptThread {
                 result,
             } => {
                 let global = self.documents.borrow().find_global(pipeline_id).unwrap();
+                let _ac = enter_realm(&*global);
                 global.handle_wgpu_msg(device, scope_id, result);
             },
             WebGPUMsg::CleanDevice {
@@ -3257,6 +3288,7 @@ impl ScriptThread {
             self.timer_task_source(incomplete.pipeline_id),
             self.websocket_task_source(incomplete.pipeline_id),
         );
+
         // Create the window and document objects.
         let window = Window::new(
             self.js_runtime.clone(),
@@ -3295,7 +3327,6 @@ impl ScriptThread {
             self.replace_surrogates,
             self.user_agent.clone(),
             self.player_context.clone(),
-            self.event_loop_waker.as_ref().map(|w| (*w).clone_box()),
             self.gpu_id_hub.clone(),
             incomplete.inherited_secure_context,
         );
@@ -3810,7 +3841,8 @@ impl ScriptThread {
             .headers(load_data.headers)
             .body(load_data.data)
             .redirect_mode(RedirectMode::Manual)
-            .origin(incomplete.origin.immutable().clone());
+            .origin(incomplete.origin.immutable().clone())
+            .crash(load_data.crash);
 
         let context = ParserContext::new(id, load_data.url);
         self.incomplete_parser_contexts
@@ -3836,6 +3868,7 @@ impl ScriptThread {
     ) {
         match fetch_metadata {
             Ok(_) => (),
+            Err(NetworkError::Crash(..)) => (),
             Err(ref e) => {
                 warn!("Network error: {:?}", e);
             },

@@ -22,14 +22,6 @@
 //! its hash table during the next GC. During GC, the entries of the hash table are counted
 //! as JS roots.
 
-use crate::dom::bindings::conversions::ToJSValConvertible;
-use crate::dom::bindings::error::Error;
-use crate::dom::bindings::reflector::{DomObject, Reflector};
-use crate::dom::bindings::root::DomRoot;
-use crate::dom::bindings::trace::trace_reflector;
-use crate::dom::promise::Promise;
-use crate::task::TaskOnce;
-use js::jsapi::JSTracer;
 use std::cell::RefCell;
 use std::collections::hash_map::Entry::{Occupied, Vacant};
 use std::collections::hash_map::HashMap;
@@ -38,12 +30,23 @@ use std::marker::PhantomData;
 use std::rc::Rc;
 use std::sync::{Arc, Weak};
 
+use js::jsapi::JSTracer;
+
+use crate::dom::bindings::conversions::ToJSValConvertible;
+use crate::dom::bindings::error::Error;
+use crate::dom::bindings::reflector::{DomObject, Reflector};
+use crate::dom::bindings::root::DomRoot;
+use crate::dom::bindings::trace::trace_reflector;
+use crate::dom::promise::Promise;
+use crate::task::TaskOnce;
+
 #[allow(missing_docs)] // FIXME
 mod dummy {
     // Attributes don’t apply through the macro.
-    use super::LiveDOMReferences;
     use std::cell::RefCell;
     use std::rc::Rc;
+
+    use super::LiveDOMReferences;
     thread_local!(pub static LIVE_REFERENCES: Rc<RefCell<Option<LiveDOMReferences>>> =
             Rc::new(RefCell::new(None)));
 }
@@ -77,7 +80,7 @@ impl TrustedPromise {
     /// Create a new `TrustedPromise` instance from an existing DOM object. The object will
     /// be prevented from being GCed for the duration of the resulting `TrustedPromise` object's
     /// lifetime.
-    #[allow(unrooted_must_root)]
+    #[allow(crown::unrooted_must_root)]
     pub fn new(promise: Rc<Promise>) -> TrustedPromise {
         LIVE_REFERENCES.with(|ref r| {
             let r = r.borrow();
@@ -127,7 +130,7 @@ impl TrustedPromise {
     }
 
     /// A task which will reject the promise.
-    #[allow(unrooted_must_root)]
+    #[allow(crown::unrooted_must_root)]
     pub fn reject_task(self, error: Error) -> impl TaskOnce {
         let this = self;
         task!(reject_promise: move || {
@@ -137,7 +140,7 @@ impl TrustedPromise {
     }
 
     /// A task which will resolve the promise.
-    #[allow(unrooted_must_root)]
+    #[allow(crown::unrooted_must_root)]
     pub fn resolve_task<T>(self, value: T) -> impl TaskOnce
     where
         T: ToJSValConvertible + Send,
@@ -154,7 +157,7 @@ impl TrustedPromise {
 /// shared among threads for use in asynchronous operations. The underlying
 /// DOM object is guaranteed to live at least as long as the last outstanding
 /// `Trusted<T>` instance.
-#[unrooted_must_root_lint::allow_unrooted_interior]
+#[crown::unrooted_must_root_lint::allow_unrooted_interior]
 pub struct Trusted<T: DomObject> {
     /// A pointer to the Rust DOM object of type T, but void to allow
     /// sending `Trusted<T>` between threads, regardless of T's sendability.
@@ -217,7 +220,7 @@ impl<T: DomObject> Clone for Trusted<T> {
 
 /// The set of live, pinned DOM objects that are currently prevented
 /// from being garbage collected due to outstanding references.
-#[allow(unrooted_must_root)]
+#[allow(crown::unrooted_must_root)]
 pub struct LiveDOMReferences {
     // keyed on pointer to Rust DOM object
     reflectable_table: RefCell<HashMap<*const libc::c_void, Weak<TrustedReference>>>,
@@ -241,7 +244,7 @@ impl LiveDOMReferences {
         });
     }
 
-    #[allow(unrooted_must_root)]
+    #[allow(crown::unrooted_must_root)]
     fn addref_promise(&self, promise: Rc<Promise>) {
         let mut table = self.promise_table.borrow_mut();
         table.entry(&*promise).or_insert(vec![]).push(promise)
@@ -291,7 +294,7 @@ fn remove_nulls<K: Eq + Hash + Clone, V>(table: &mut HashMap<K, Weak<V>>) {
 }
 
 /// A JSTraceDataOp for tracing reflectors held in LIVE_REFERENCES
-#[allow(unrooted_must_root)]
+#[allow(crown::unrooted_must_root)]
 pub unsafe fn trace_refcounted_objects(tracer: *mut JSTracer) {
     info!("tracing live refcounted references");
     LIVE_REFERENCES.with(|ref r| {

@@ -2,14 +2,14 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
-use crate::dom::bindings::codegen::Bindings::XRWebGLSubImageBinding::XRWebGLSubImageBinding::XRWebGLSubImageMethods;
-use crate::dom::bindings::root::Dom;
-use crate::dom::bindings::root::DomRoot;
-use crate::dom::webgltexture::WebGLTexture;
-use crate::dom::xrsubimage::XRSubImage;
 use dom_struct::dom_struct;
 use euclid::Size2D;
 use webxr_api::Viewport;
+
+use crate::dom::bindings::codegen::Bindings::XRWebGLSubImageBinding::XRWebGLSubImage_Binding::XRWebGLSubImageMethods;
+use crate::dom::bindings::root::{Dom, DomRoot};
+use crate::dom::webgltexture::WebGLTexture;
+use crate::dom::xrsubimage::XRSubImage;
 
 #[dom_struct]
 pub struct XRWebGLSubImage {
@@ -17,6 +17,7 @@ pub struct XRWebGLSubImage {
     color_texture: Dom<WebGLTexture>,
     depth_stencil_texture: Option<Dom<WebGLTexture>>,
     image_index: Option<u32>,
+    #[no_trace]
     size: Size2D<u32, Viewport>,
 }
 

@@ -2,17 +2,13 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
-use crate::dom::attr::AttrHelpersForLayout;
-use crate::dom::bindings::inheritance::{
-    CharacterDataTypeId, DocumentFragmentTypeId, ElementTypeId,
-};
-use crate::dom::bindings::inheritance::{HTMLElementTypeId, NodeTypeId, TextTypeId};
-use crate::dom::bindings::root::LayoutDom;
-use crate::dom::characterdata::LayoutCharacterDataHelpers;
-use crate::dom::element::{Element, LayoutElementHelpers};
-use crate::dom::node::{LayoutNodeHelpers, NodeFlags};
+use std::fmt;
+use std::hash::{Hash, Hasher};
+use std::marker::PhantomData;
+use std::sync::atomic::Ordering;
+
 use atomic_refcell::{AtomicRef, AtomicRefMut};
-use html5ever::{LocalName, Namespace};
+use html5ever::{local_name, namespace_url, ns, LocalName, Namespace};
 use script_layout_interface::wrapper_traits::{
     GetStyleAndOpaqueLayoutData, LayoutDataTrait, LayoutNode, PseudoElementType,
     ThreadSafeLayoutElement, ThreadSafeLayoutNode,
@@ -23,29 +19,33 @@ use selectors::matching::{ElementSelectorFlags, MatchingContext, VisitedHandling
 use selectors::sink::Push;
 use servo_arc::{Arc, ArcBorrow};
 use servo_atoms::Atom;
-use std::fmt;
-use std::hash::{Hash, Hasher};
-use std::marker::PhantomData;
-use std::sync::atomic::Ordering;
 use style::animation::AnimationSetKey;
 use style::applicable_declarations::ApplicableDeclarationBlock;
 use style::attr::AttrValue;
 use style::context::SharedStyleContext;
 use style::data::ElementData;
 use style::dom::{DomChildren, LayoutIterator, TDocument, TElement, TNode, TShadowRoot};
-use style::element_state::*;
 use style::properties::PropertyDeclarationBlock;
 use style::selector_parser::{
     extended_filtering, AttrValue as SelectorAttrValue, Lang, NonTSPseudoClass, PseudoElement,
     SelectorImpl,
 };
 use style::shared_lock::Locked as StyleLocked;
+use style::values::computed::Display;
 use style::values::{AtomIdent, AtomString};
 use style::CaseSensitivityExt;
+use style_traits::dom::ElementState;
 
-use crate::layout_dom::ServoLayoutNode;
-use crate::layout_dom::ServoShadowRoot;
-use crate::layout_dom::ServoThreadSafeLayoutNode;
+use crate::dom::attr::AttrHelpersForLayout;
+use crate::dom::bindings::inheritance::{
+    CharacterDataTypeId, DocumentFragmentTypeId, ElementTypeId, HTMLElementTypeId, NodeTypeId,
+    TextTypeId,
+};
+use crate::dom::bindings::root::LayoutDom;
+use crate::dom::characterdata::LayoutCharacterDataHelpers;
+use crate::dom::element::{Element, LayoutElementHelpers};
+use crate::dom::node::{LayoutNodeHelpers, NodeFlags};
+use crate::layout_dom::{ServoLayoutNode, ServoShadowRoot, ServoThreadSafeLayoutNode};
 
 /// A wrapper around elements that ensures layout can only ever access safe properties.
 pub struct ServoLayoutElement<'dom, LayoutDataType: LayoutDataTrait> {
@@ -244,11 +244,6 @@ impl<'dom, LayoutDataType: LayoutDataTrait> style::dom::TElement
     }
 
     #[inline]
-    fn has_attr(&self, namespace: &style::Namespace, attr: &style::LocalName) -> bool {
-        self.get_attr(&**namespace, &**attr).is_some()
-    }
-
-    #[inline]
     fn id(&self) -> Option<&Atom> {
         unsafe { (*self.element.id_attribute()).as_ref() }
     }
@@ -358,14 +353,6 @@ impl<'dom, LayoutDataType: LayoutDataTrait> style::dom::TElement
         false
     }
 
-    unsafe fn set_selector_flags(&self, flags: ElementSelectorFlags) {
-        self.element.insert_selector_flags(flags);
-    }
-
-    fn has_selector_flags(&self, flags: ElementSelectorFlags) -> bool {
-        self.element.has_selector_flags(flags)
-    }
-
     fn has_animations(&self, context: &SharedStyleContext) -> bool {
         // This is not used for pseudo elements currently so we can pass None.
         return self.has_css_animations(context, /* pseudo_element = */ None) ||
@@ -460,6 +447,13 @@ impl<'dom, LayoutDataType: LayoutDataTrait> style::dom::TElement
     fn namespace(&self) -> &Namespace {
         self.element.namespace()
     }
+
+    fn query_container_size(
+        &self,
+        _display: &Display,
+    ) -> euclid::default::Size2D<Option<app_units::Au>> {
+        todo!();
+    }
 }
 
 impl<'dom, LayoutDataType: LayoutDataTrait> ::selectors::Element
@@ -509,6 +503,12 @@ impl<'dom, LayoutDataType: LayoutDataTrait> ::selectors::Element
             node = sibling;
         }
         None
+    }
+
+    fn first_element_child(&self) -> Option<Self> {
+        self.as_node()
+            .dom_children()
+            .find_map(|child| child.as_element())
     }
 
     fn attr_matches(
@@ -573,15 +573,11 @@ impl<'dom, LayoutDataType: LayoutDataTrait> ::selectors::Element
         false
     }
 
-    fn match_non_ts_pseudo_class<F>(
+    fn match_non_ts_pseudo_class(
         &self,
         pseudo_class: &NonTSPseudoClass,
         _: &mut MatchingContext<Self::Impl>,
-        _: &mut F,
-    ) -> bool
-    where
-        F: FnMut(&Self, ElementSelectorFlags),
-    {
+    ) -> bool {
         match *pseudo_class {
             // https://github.com/servo/servo/issues/8718
             NonTSPseudoClass::Link | NonTSPseudoClass::AnyLink => self.is_link(),
@@ -611,6 +607,8 @@ impl<'dom, LayoutDataType: LayoutDataTrait> ::selectors::Element
             NonTSPseudoClass::Enabled |
             NonTSPseudoClass::Disabled |
             NonTSPseudoClass::Checked |
+            NonTSPseudoClass::Valid |
+            NonTSPseudoClass::Invalid |
             NonTSPseudoClass::Indeterminate |
             NonTSPseudoClass::ReadWrite |
             NonTSPseudoClass::PlaceholderShown |
@@ -667,6 +665,22 @@ impl<'dom, LayoutDataType: LayoutDataTrait> ::selectors::Element
 
     fn is_html_element_in_html_document(&self) -> bool {
         self.element.is_html_element() && self.as_node().owner_doc().is_html_document()
+    }
+
+    fn apply_selector_flags(&self, flags: ElementSelectorFlags) {
+        // Handle flags that apply to the element.
+        let self_flags = flags.for_self();
+        if !self_flags.is_empty() {
+            self.element.insert_selector_flags(flags);
+        }
+
+        // Handle flags that apply to the parent.
+        let parent_flags = flags.for_parent();
+        if !parent_flags.is_empty() {
+            if let Some(p) = self.as_node().parent_element() {
+                p.element.insert_selector_flags(flags);
+            }
+        }
     }
 }
 
@@ -804,6 +818,12 @@ impl<'dom, LayoutDataType: LayoutDataTrait> ::selectors::Element
         None
     }
 
+    // Skips non-element nodes
+    fn first_element_child(&self) -> Option<Self> {
+        warn!("ServoThreadSafeLayoutElement::first_element_child called");
+        None
+    }
+
     fn is_html_slot_element(&self) -> bool {
         self.element.is_html_slot_element()
     }
@@ -856,15 +876,11 @@ impl<'dom, LayoutDataType: LayoutDataTrait> ::selectors::Element
         }
     }
 
-    fn match_non_ts_pseudo_class<F>(
+    fn match_non_ts_pseudo_class(
         &self,
         _: &NonTSPseudoClass,
         _: &mut MatchingContext<Self::Impl>,
-        _: &mut F,
-    ) -> bool
-    where
-        F: FnMut(&Self, ElementSelectorFlags),
-    {
+    ) -> bool {
         // NB: This could maybe be implemented
         warn!("ServoThreadSafeLayoutElement::match_non_ts_pseudo_class called");
         false
@@ -904,6 +920,22 @@ impl<'dom, LayoutDataType: LayoutDataTrait> ::selectors::Element
     fn is_root(&self) -> bool {
         warn!("ServoThreadSafeLayoutElement::is_root called");
         false
+    }
+
+    fn apply_selector_flags(&self, flags: ElementSelectorFlags) {
+        // Handle flags that apply to the element.
+        let self_flags = flags.for_self();
+        if !self_flags.is_empty() {
+            self.element.element.insert_selector_flags(flags);
+        }
+
+        // Handle flags that apply to the parent.
+        let parent_flags = flags.for_parent();
+        if !parent_flags.is_empty() {
+            if let Some(p) = self.element.parent_element() {
+                p.element.insert_selector_flags(flags);
+            }
+        }
     }
 }
 

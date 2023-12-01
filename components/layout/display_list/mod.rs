@@ -2,12 +2,11 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
-pub use self::builder::BorderPaintingMode;
-pub use self::builder::DisplayListBuildState;
-pub use self::builder::IndexableText;
-pub use self::builder::StackingContextCollectionFlags;
-pub use self::builder::StackingContextCollectionState;
-pub use self::conversions::ToLayout;
+pub use self::builder::{
+    BorderPaintingMode, DisplayListBuildState, IndexableText, StackingContextCollectionFlags,
+    StackingContextCollectionState,
+};
+pub use self::conversions::{FilterToLayout, ToLayout};
 
 mod background;
 mod border;

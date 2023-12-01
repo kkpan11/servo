@@ -4,27 +4,25 @@
 
 #![cfg(not(target_os = "windows"))]
 
-use crate::fetch_with_context;
-use crate::fetch_with_cors_cache;
-use crate::http_loader::{expect_devtools_http_request, expect_devtools_http_response};
-use crate::{
-    create_embedder_proxy, fetch, make_server, make_ssl_server, new_fetch_context,
-    DEFAULT_USER_AGENT,
-};
+use std::fs;
+use std::iter::FromIterator;
+use std::path::Path;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, Weak};
+use std::time::{Duration, SystemTime};
+
 use crossbeam_channel::{unbounded, Sender};
-use devtools_traits::HttpRequest as DevtoolsHttpRequest;
-use devtools_traits::HttpResponse as DevtoolsHttpResponse;
-use headers::StrictTransportSecurity;
-use headers::{AccessControlAllowCredentials, AccessControlAllowHeaders, AccessControlAllowOrigin};
-use headers::{AccessControlAllowMethods, AccessControlMaxAge, HeaderMapExt};
-use headers::{CacheControl, ContentLength, ContentType, Expires, LastModified, Pragma, UserAgent};
+use devtools_traits::{HttpRequest as DevtoolsHttpRequest, HttpResponse as DevtoolsHttpResponse};
+use headers::{
+    AccessControlAllowCredentials, AccessControlAllowHeaders, AccessControlAllowMethods,
+    AccessControlAllowOrigin, AccessControlMaxAge, CacheControl, ContentLength, ContentType,
+    Expires, HeaderMapExt, LastModified, Pragma, StrictTransportSecurity, UserAgent,
+};
 use http::header::{self, HeaderMap, HeaderName, HeaderValue};
 use http::{Method, StatusCode};
-use hyper::Body;
-use hyper::{Request as HyperRequest, Response as HyperResponse};
+use hyper::{Body, Request as HyperRequest, Response as HyperResponse};
 use mime::{self, Mime};
 use msg::constellation_msg::TEST_PIPELINE_ID;
-use net::connector::{create_tls_config, ConnectionCerts, ExtraCerts, ALPN_H2_H1};
 use net::fetch::cors_cache::CorsCache;
 use net::fetch::methods::{self, CancellationListener, FetchContext};
 use net::filemanager_thread::FileManager;
@@ -42,14 +40,14 @@ use net_traits::{
 };
 use servo_arc::Arc as ServoArc;
 use servo_url::{ImmutableOrigin, ServoUrl};
-use std::fs;
-use std::iter::FromIterator;
-use std::path::Path;
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, Weak};
-use std::time::{Duration, SystemTime};
 use tokio_test::block_on;
 use uuid::Uuid;
+
+use crate::http_loader::{expect_devtools_http_request, expect_devtools_http_response};
+use crate::{
+    create_embedder_proxy, fetch, fetch_with_context, fetch_with_cors_cache, make_server,
+    make_ssl_server, new_fetch_context, DEFAULT_USER_AGENT,
+};
 
 // TODO write a struct that impls Handler for storing test values
 
@@ -756,24 +754,10 @@ fn test_fetch_with_hsts() {
         *response.body_mut() = MESSAGE.to_vec().into();
     };
 
-    let cert_path = Path::new("../../resources/self_signed_certificate_for_testing.crt")
-        .canonicalize()
-        .unwrap();
-    let key_path = Path::new("../../resources/privatekey_for_testing.key")
-        .canonicalize()
-        .unwrap();
-    let (server, url) = make_ssl_server(handler, cert_path.clone(), key_path.clone());
-
-    let certs = fs::read_to_string(cert_path).expect("Couldn't find certificate file");
-    let tls_config = create_tls_config(
-        &certs,
-        ALPN_H2_H1,
-        ExtraCerts::new(),
-        ConnectionCerts::new(),
-    );
+    let (server, url) = make_ssl_server(handler);
 
     let mut context = FetchContext {
-        state: Arc::new(HttpState::new(tls_config)),
+        state: Arc::new(HttpState::new()),
         user_agent: DEFAULT_USER_AGENT.into(),
         devtools_chan: None,
         filemanager: Arc::new(Mutex::new(FileManager::new(
@@ -786,6 +770,12 @@ fn test_fetch_with_hsts() {
             ResourceTimingType::Navigation,
         ))),
     };
+
+    // The server certificate is self-signed, so we need to add an override
+    // so that the connection works properly.
+    for certificate in server.certificates.as_ref().unwrap().iter() {
+        context.state.override_manager.add_override(certificate);
+    }
 
     {
         let mut list = context.state.hsts_list.write().unwrap();
@@ -821,25 +811,12 @@ fn test_load_adds_host_to_hsts_list_when_url_is_https() {
             ));
         *response.body_mut() = b"Yay!".to_vec().into();
     };
-    let cert_path = Path::new("../../resources/self_signed_certificate_for_testing.crt")
-        .canonicalize()
-        .unwrap();
-    let key_path = Path::new("../../resources/privatekey_for_testing.key")
-        .canonicalize()
-        .unwrap();
-    let (server, mut url) = make_ssl_server(handler, cert_path.clone(), key_path.clone());
+
+    let (server, mut url) = make_ssl_server(handler);
     url.as_mut_url().set_scheme("https").unwrap();
 
-    let certs = fs::read_to_string(cert_path).expect("Couldn't find certificate file");
-    let tls_config = create_tls_config(
-        &certs,
-        ALPN_H2_H1,
-        ExtraCerts::new(),
-        ConnectionCerts::new(),
-    );
-
     let mut context = FetchContext {
-        state: Arc::new(HttpState::new(tls_config)),
+        state: Arc::new(HttpState::new()),
         user_agent: DEFAULT_USER_AGENT.into(),
         devtools_chan: None,
         filemanager: Arc::new(Mutex::new(FileManager::new(
@@ -852,6 +829,12 @@ fn test_load_adds_host_to_hsts_list_when_url_is_https() {
             ResourceTimingType::Navigation,
         ))),
     };
+
+    // The server certificate is self-signed, so we need to add an override
+    // so that the connection works properly.
+    for certificate in server.certificates.as_ref().unwrap().iter() {
+        context.state.override_manager.add_override(certificate);
+    }
 
     let mut request = RequestBuilder::new(url.clone(), Referrer::NoReferrer)
         .method(Method::GET)
@@ -885,29 +868,12 @@ fn test_fetch_self_signed() {
     let handler = move |_: HyperRequest<Body>, response: &mut HyperResponse<Body>| {
         *response.body_mut() = b"Yay!".to_vec().into();
     };
-    let client_cert_path = Path::new("../../resources/certs").canonicalize().unwrap();
-    let cert_path = Path::new("../../resources/self_signed_certificate_for_testing.crt")
-        .canonicalize()
-        .unwrap();
-    let key_path = Path::new("../../resources/privatekey_for_testing.key")
-        .canonicalize()
-        .unwrap();
-    let (_server, mut url) = make_ssl_server(handler, cert_path.clone(), key_path.clone());
+
+    let (server, mut url) = make_ssl_server(handler);
     url.as_mut_url().set_scheme("https").unwrap();
 
-    let cert_data = fs::read_to_string(cert_path.clone()).expect("Couldn't find certificate file");
-    let client_cert_data =
-        fs::read_to_string(client_cert_path.clone()).expect("Couldn't find certificate file");
-    let extra_certs = ExtraCerts::new();
-    let tls_config = create_tls_config(
-        &client_cert_data,
-        ALPN_H2_H1,
-        extra_certs.clone(),
-        ConnectionCerts::new(),
-    );
-
     let mut context = FetchContext {
-        state: Arc::new(HttpState::new(tls_config)),
+        state: Arc::new(HttpState::new()),
         user_agent: DEFAULT_USER_AGENT.into(),
         devtools_chan: None,
         filemanager: Arc::new(Mutex::new(FileManager::new(
@@ -936,16 +902,11 @@ fn test_fetch_self_signed() {
         Some(NetworkError::SslValidation(..))
     ));
 
-    extra_certs.add(cert_data.as_bytes().into());
-
-    // FIXME: something weird happens inside the SSL server after the first
-    //        connection encounters a verification error, and it no longer
-    //        accepts new connections that should work fine. We are forced
-    //        to start a new server and connect to that to verfiy that
-    //        the self-signed cert is now accepted.
-
-    let (server, mut url) = make_ssl_server(handler, cert_path.clone(), key_path.clone());
-    url.as_mut_url().set_scheme("https").unwrap();
+    // The server certificate is self-signed, so we need to add an override
+    // so that the connection works properly.
+    for certificate in server.certificates.as_ref().unwrap().iter() {
+        context.state.override_manager.add_override(certificate);
+    }
 
     let mut request = RequestBuilder::new(url.clone(), Referrer::NoReferrer)
         .method(Method::GET)

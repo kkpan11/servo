@@ -2,21 +2,24 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
+use std::cell::Cell;
+
+use canvas_traits::webgl::{
+    ActiveAttribInfo, WebGLCommand, WebGLError, WebGLResult, WebGLVersion, WebGLVertexArrayId,
+};
+
 use crate::dom::bindings::cell::{ref_filter_map, DomRefCell, Ref};
 use crate::dom::bindings::codegen::Bindings::WebGL2RenderingContextBinding::WebGL2RenderingContextConstants as constants2;
 use crate::dom::bindings::codegen::Bindings::WebGLRenderingContextBinding::WebGLRenderingContextConstants as constants;
 use crate::dom::bindings::root::{Dom, MutNullableDom};
 use crate::dom::webglbuffer::WebGLBuffer;
 use crate::dom::webglrenderingcontext::{Operation, WebGLRenderingContext};
-use canvas_traits::webgl::{
-    ActiveAttribInfo, WebGLCommand, WebGLError, WebGLResult, WebGLVersion, WebGLVertexArrayId,
-};
-use std::cell::Cell;
 
 #[derive(JSTraceable, MallocSizeOf)]
-#[unrooted_must_root_lint::must_root]
+#[crown::unrooted_must_root_lint::must_root]
 pub struct VertexArrayObject {
     context: Dom<WebGLRenderingContext>,
+    #[no_trace]
     id: Option<WebGLVertexArrayId>,
     ever_bound: Cell<bool>,
     is_deleted: Cell<bool>,
@@ -261,7 +264,7 @@ impl Drop for VertexArrayObject {
 }
 
 #[derive(Clone, JSTraceable, MallocSizeOf)]
-#[unrooted_must_root_lint::must_root]
+#[crown::unrooted_must_root_lint::must_root]
 pub struct VertexAttribData {
     pub enabled_as_array: bool,
     pub size: u8,
@@ -275,7 +278,7 @@ pub struct VertexAttribData {
 }
 
 impl Default for VertexAttribData {
-    #[allow(unrooted_must_root)]
+    #[allow(crown::unrooted_must_root)]
     fn default() -> Self {
         Self {
             enabled_as_array: false,

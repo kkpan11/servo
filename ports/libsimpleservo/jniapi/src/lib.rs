@@ -4,8 +4,10 @@
 
 #![allow(non_snake_case)]
 
-#[macro_use]
-extern crate log;
+use std::os::raw::{c_char, c_int, c_void};
+use std::ptr::{null, null_mut};
+use std::sync::Arc;
+use std::thread;
 
 use android_logger::{self, Filter};
 use gstreamer::debug_set_threshold_from_string;
@@ -14,16 +16,11 @@ use jni::sys::{jboolean, jfloat, jint, jstring, JNI_TRUE};
 use jni::{errors, JNIEnv, JavaVM};
 use libc::{dup2, pipe, read};
 use log::Level;
-use simpleservo::{self, deinit, gl_glue, MouseButton, ServoGlue, SERVO};
-use simpleservo::{self, gl_glue, ServoGlue, SERVO};
 use simpleservo::{
-    Coordinates, DeviceIntRect, EventLoopWaker, HostTrait, InitOptions, InputMethodType,
-    MediaSessionPlaybackState, PromptResult, VRInitOptions,
+    self, self, deinit, gl_glue, gl_glue, Coordinates, DeviceIntRect, EventLoopWaker, HostTrait,
+    InitOptions, InputMethodType, MediaSessionPlaybackState, MouseButton, PromptResult, ServoGlue,
+    ServoGlue, VRInitOptions, SERVO, SERVO,
 };
-use std::os::raw::{c_char, c_int, c_void};
-use std::ptr::{null, null_mut};
-use std::sync::Arc;
-use std::thread;
 
 struct HostCallbacks {
     callbacks: GlobalRef,

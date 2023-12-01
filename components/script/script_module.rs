@@ -5,12 +5,51 @@
 //! The script module mod contains common traits and structs
 //! related to `type=module` for script thread or worker threads.
 
+use std::collections::{HashMap, HashSet};
+use std::rc::Rc;
+use std::str::FromStr;
+use std::sync::{Arc, Mutex};
+use std::{mem, ptr};
+
+use encoding_rs::UTF_8;
+use html5ever::local_name;
+use hyper_serde::Serde;
+use indexmap::IndexSet;
+use ipc_channel::ipc;
+use ipc_channel::router::ROUTER;
+use js::jsapi::{
+    CompileModule1, ExceptionStackBehavior, FinishDynamicModuleImport, GetModuleRequestSpecifier,
+    GetModuleResolveHook, GetRequestedModuleSpecifier, GetRequestedModulesCount,
+    Handle as RawHandle, HandleObject, HandleValue as RawHandleValue, Heap, JSAutoRealm, JSContext,
+    JSObject, JSRuntime, JSString, JS_ClearPendingException, JS_DefineProperty4,
+    JS_IsExceptionPending, JS_NewStringCopyN, ModuleErrorBehaviour, ModuleEvaluate, ModuleLink,
+    MutableHandleValue, SetModuleDynamicImportHook, SetModuleMetadataHook, SetModulePrivate,
+    SetModuleResolveHook, SetScriptPrivateReferenceHooks, ThrowOnModuleEvaluationFailure, Value,
+    JSPROP_ENUMERATE,
+};
+use js::jsval::{JSVal, PrivateValue, UndefinedValue};
+use js::rust::jsapi_wrapped::JS_GetPendingException;
+use js::rust::wrappers::JS_SetPendingException;
+use js::rust::{
+    transform_str_to_source_text, CompileOptionsWrapper, Handle, HandleValue, IntoHandle,
+};
+use mime::Mime;
+use net_traits::request::{
+    CredentialsMode, Destination, ParserMetadata, Referrer, RequestBuilder, RequestMode,
+};
+use net_traits::{
+    CoreResourceMsg, FetchChannels, FetchMetadata, FetchResponseListener, IpcSend, Metadata,
+    NetworkError, ReferrerPolicy, ResourceFetchTiming, ResourceTimingType,
+};
+use servo_url::ServoUrl;
+use url::ParseError as UrlParseError;
+use uuid::Uuid;
+
 use crate::document_loader::LoadType;
 use crate::dom::bindings::cell::DomRefCell;
-use crate::dom::bindings::codegen::Bindings::WindowBinding::WindowBinding::WindowMethods;
+use crate::dom::bindings::codegen::Bindings::WindowBinding::Window_Binding::WindowMethods;
 use crate::dom::bindings::conversions::jsstring_to_str;
-use crate::dom::bindings::error::report_pending_exception;
-use crate::dom::bindings::error::Error;
+use crate::dom::bindings::error::{report_pending_exception, Error};
 use crate::dom::bindings::inheritance::Castable;
 use crate::dom::bindings::refcounted::Trusted;
 use crate::dom::bindings::reflector::DomObject;
@@ -22,62 +61,20 @@ use crate::dom::document::Document;
 use crate::dom::dynamicmoduleowner::{DynamicModuleId, DynamicModuleOwner};
 use crate::dom::element::Element;
 use crate::dom::globalscope::GlobalScope;
-use crate::dom::htmlscriptelement::{HTMLScriptElement, ScriptId};
-use crate::dom::htmlscriptelement::{ScriptOrigin, ScriptType, SCRIPT_JS_MIMES};
+use crate::dom::htmlscriptelement::{
+    HTMLScriptElement, ScriptId, ScriptOrigin, ScriptType, SCRIPT_JS_MIMES,
+};
 use crate::dom::node::document_from_node;
 use crate::dom::performanceresourcetiming::InitiatorType;
 use crate::dom::promise::Promise;
 use crate::dom::promisenativehandler::{Callback, PromiseNativeHandler};
 use crate::dom::window::Window;
 use crate::dom::worker::TrustedWorkerAddress;
-use crate::network_listener::{self, NetworkListener};
-use crate::network_listener::{PreInvoke, ResourceTimingListener};
+use crate::network_listener::{self, NetworkListener, PreInvoke, ResourceTimingListener};
 use crate::realms::{enter_realm, AlreadyInRealm, InRealm};
 use crate::script_runtime::JSContext as SafeJSContext;
 use crate::task::TaskBox;
 use crate::task_source::TaskSourceName;
-use encoding_rs::UTF_8;
-use hyper_serde::Serde;
-use indexmap::IndexSet;
-use ipc_channel::ipc;
-use ipc_channel::router::ROUTER;
-use js::jsapi::Handle as RawHandle;
-use js::jsapi::HandleObject;
-use js::jsapi::HandleValue as RawHandleValue;
-use js::jsapi::MutableHandleValue;
-use js::jsapi::Value;
-use js::jsapi::{CompileModule1, ExceptionStackBehavior, FinishDynamicModuleImport};
-use js::jsapi::{GetModuleRequestSpecifier, GetRequestedModules, SetModuleMetadataHook};
-use js::jsapi::{GetModuleResolveHook, JSRuntime, SetModuleResolveHook};
-use js::jsapi::{Heap, JSContext, JS_ClearPendingException, SetModulePrivate};
-use js::jsapi::{JSAutoRealm, JSObject, JSString};
-use js::jsapi::{JS_DefineProperty4, JS_IsExceptionPending, JS_NewStringCopyN, JSPROP_ENUMERATE};
-use js::jsapi::{ModuleErrorBehaviour, ModuleEvaluate, ModuleLink, ThrowOnModuleEvaluationFailure};
-use js::jsapi::{SetModuleDynamicImportHook, SetScriptPrivateReferenceHooks};
-use js::jsval::{JSVal, PrivateValue, UndefinedValue};
-use js::rust::jsapi_wrapped::{GetArrayLength, JS_GetElement};
-use js::rust::jsapi_wrapped::{GetRequestedModuleSpecifier, JS_GetPendingException};
-use js::rust::transform_str_to_source_text;
-use js::rust::wrappers::JS_SetPendingException;
-use js::rust::CompileOptionsWrapper;
-use js::rust::{Handle, HandleValue, IntoHandle};
-use mime::Mime;
-use net_traits::request::{CredentialsMode, Destination, ParserMetadata};
-use net_traits::request::{Referrer, RequestBuilder, RequestMode};
-use net_traits::IpcSend;
-use net_traits::{CoreResourceMsg, FetchChannels};
-use net_traits::{FetchMetadata, Metadata, ReferrerPolicy};
-use net_traits::{FetchResponseListener, NetworkError};
-use net_traits::{ResourceFetchTiming, ResourceTimingType};
-use servo_url::ServoUrl;
-use std::collections::{HashMap, HashSet};
-use std::mem;
-use std::ptr;
-use std::rc::Rc;
-use std::str::FromStr;
-use std::sync::{Arc, Mutex};
-use url::ParseError as UrlParseError;
-use uuid::Uuid;
 
 #[allow(unsafe_code)]
 unsafe fn gen_type_error(global: &GlobalScope, string: String) -> RethrowError {
@@ -145,7 +142,7 @@ impl ModuleScript {
 #[derive(Clone, Debug, Eq, Hash, JSTraceable, PartialEq)]
 pub enum ModuleIdentity {
     ScriptId(ScriptId),
-    ModuleUrl(ServoUrl),
+    ModuleUrl(#[no_trace] ServoUrl),
 }
 
 impl ModuleIdentity {
@@ -165,6 +162,7 @@ impl ModuleIdentity {
 
 #[derive(JSTraceable)]
 pub struct ModuleTree {
+    #[no_trace]
     url: ServoUrl,
     text: DomRefCell<Rc<DOMString>>,
     record: DomRefCell<Option<ModuleObject>>,
@@ -177,12 +175,17 @@ pub struct ModuleTree {
     // By default all maps in web specs are ordered maps
     // (https://infra.spec.whatwg.org/#ordered-map), however we can usually get away with using
     // stdlib maps and sets because we rarely iterate over them.
+    #[custom_trace]
     parent_identities: DomRefCell<IndexSet<ModuleIdentity>>,
+    #[no_trace]
     descendant_urls: DomRefCell<IndexSet<ServoUrl>>,
     // A set to memoize which descendants are under fetching
+    #[no_trace]
     incomplete_fetch_urls: DomRefCell<IndexSet<ServoUrl>>,
+    #[no_trace]
     visited_urls: DomRefCell<HashSet<ServoUrl>>,
     rethrow_error: DomRefCell<Option<RethrowError>>,
+    #[no_trace]
     network_error: DomRefCell<Option<NetworkError>>,
     // A promise for owners to execute when the module tree
     // is finished
@@ -324,7 +327,7 @@ impl ModuleTree {
         let module_map = global.get_module_map().borrow();
         let mut discovered_urls = HashSet::new();
 
-        return ModuleTree::recursive_check_descendants(&self, &module_map, &mut discovered_urls);
+        return ModuleTree::recursive_check_descendants(&self, &module_map.0, &mut discovered_urls);
     }
 
     // We just leverage the power of Promise to run the task for `finish` the owner.
@@ -564,34 +567,11 @@ impl ModuleTree {
         let mut specifier_urls = IndexSet::new();
 
         unsafe {
-            rooted!(in(*cx) let requested_modules = GetRequestedModules(*cx, module_object));
-
-            let mut length = 0;
-
-            if !GetArrayLength(*cx, requested_modules.handle(), &mut length) {
-                let module_length_error =
-                    gen_type_error(&global, "Wrong length of requested modules".to_owned());
-
-                return Err(module_length_error);
-            }
+            let length = GetRequestedModulesCount(*cx, module_object);
 
             for index in 0..length {
-                rooted!(in(*cx) let mut element = UndefinedValue());
-
-                if !JS_GetElement(
-                    *cx,
-                    requested_modules.handle(),
-                    index,
-                    &mut element.handle_mut(),
-                ) {
-                    let get_element_error =
-                        gen_type_error(&global, "Failed to get requested module".to_owned());
-
-                    return Err(get_element_error);
-                }
-
                 rooted!(in(*cx) let specifier = GetRequestedModuleSpecifier(
-                    *cx, element.handle()
+                    *cx, module_object, index
                 ));
 
                 let url = ModuleTree::resolve_module_specifier(
@@ -926,7 +906,7 @@ impl ModuleOwner {
 
                     let network_error = module_tree.get_network_error().borrow();
                     match network_error.as_ref() {
-                        Some(network_error) => Err(network_error.clone()),
+                        Some(network_error) => Err(network_error.clone().into()),
                         None => match module_identity {
                             ModuleIdentity::ModuleUrl(script_src) => Ok(ScriptOrigin::external(
                                 Rc::clone(&module_tree.get_text().borrow()),
@@ -1296,11 +1276,15 @@ pub unsafe extern "C" fn host_import_module_dynamically(
 #[derive(Clone, JSTraceable, MallocSizeOf)]
 /// <https://html.spec.whatwg.org/multipage/#script-fetch-options>
 pub struct ScriptFetchOptions {
+    #[no_trace]
     pub referrer: Referrer,
     pub integrity_metadata: String,
+    #[no_trace]
     pub credentials_mode: CredentialsMode,
     pub cryptographic_nonce: String,
+    #[no_trace]
     pub parser_metadata: ParserMetadata,
+    #[no_trace]
     pub referrer_policy: Option<ReferrerPolicy>,
 }
 
@@ -1514,7 +1498,7 @@ pub(crate) fn fetch_external_module_script(
 }
 
 #[derive(JSTraceable, MallocSizeOf)]
-#[unrooted_must_root_lint::must_root]
+#[crown::unrooted_must_root_lint::must_root]
 pub(crate) struct DynamicModuleList {
     requests: Vec<RootedTraceableBox<DynamicModule>>,
 
@@ -1548,7 +1532,7 @@ impl DynamicModuleList {
     }
 }
 
-#[unrooted_must_root_lint::must_root]
+#[crown::unrooted_must_root_lint::must_root]
 #[derive(JSTraceable, MallocSizeOf)]
 struct DynamicModule {
     #[ignore_malloc_size_of = "Rc is hard"]

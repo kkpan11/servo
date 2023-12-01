@@ -2,10 +2,36 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
+use std::mem::replace;
+use std::sync::atomic::AtomicBool;
+use std::sync::Arc;
+use std::thread::{self, JoinHandle};
+
+use crossbeam_channel::{unbounded, Receiver, Sender};
+use devtools_traits::DevtoolScriptControlMsg;
+use dom_struct::dom_struct;
+use ipc_channel::ipc::IpcReceiver;
+use ipc_channel::router::ROUTER;
+use js::jsapi::{Heap, JSContext, JSObject, JS_AddInterruptCallback};
+use js::jsval::UndefinedValue;
+use js::rust::{CustomAutoRooter, CustomAutoRooterGuard, HandleValue};
+use msg::constellation_msg::{BrowsingContextId, PipelineId, TopLevelBrowsingContextId};
+use net_traits::image_cache::ImageCache;
+use net_traits::request::{
+    CredentialsMode, Destination, ParserMetadata, Referrer, RequestBuilder, RequestMode,
+};
+use net_traits::IpcSend;
+use parking_lot::Mutex;
+use script_traits::{WorkerGlobalScopeInit, WorkerScriptLoadOrigin};
+use servo_rand::random;
+use servo_url::{ImmutableOrigin, ServoUrl};
+use style::thread_state::{self, ThreadState};
+
 use crate::devtools;
 use crate::dom::abstractworker::{SimpleWorkerErrorHandler, WorkerScriptMsg};
-use crate::dom::abstractworkerglobalscope::{run_worker_event_loop, WorkerEventLoopMethods};
-use crate::dom::abstractworkerglobalscope::{SendableWorkerScriptChan, WorkerThreadWorkerChan};
+use crate::dom::abstractworkerglobalscope::{
+    run_worker_event_loop, SendableWorkerScriptChan, WorkerEventLoopMethods, WorkerThreadWorkerChan,
+};
 use crate::dom::bindings::cell::DomRefCell;
 use crate::dom::bindings::codegen::Bindings::DedicatedWorkerGlobalScopeBinding;
 use crate::dom::bindings::codegen::Bindings::DedicatedWorkerGlobalScopeBinding::DedicatedWorkerGlobalScopeMethods;
@@ -36,29 +62,6 @@ use crate::script_runtime::{
 use crate::task_queue::{QueuedTask, QueuedTaskConversion, TaskQueue};
 use crate::task_source::networking::NetworkingTaskSource;
 use crate::task_source::TaskSourceName;
-use crossbeam_channel::{unbounded, Receiver, Sender};
-use devtools_traits::DevtoolScriptControlMsg;
-use dom_struct::dom_struct;
-use ipc_channel::ipc::IpcReceiver;
-use ipc_channel::router::ROUTER;
-use js::jsapi::JS_AddInterruptCallback;
-use js::jsapi::{Heap, JSContext, JSObject};
-use js::jsval::UndefinedValue;
-use js::rust::{CustomAutoRooter, CustomAutoRooterGuard, HandleValue};
-use msg::constellation_msg::{BrowsingContextId, PipelineId, TopLevelBrowsingContextId};
-use net_traits::image_cache::ImageCache;
-use net_traits::request::{CredentialsMode, Destination, ParserMetadata};
-use net_traits::request::{Referrer, RequestBuilder, RequestMode};
-use net_traits::IpcSend;
-use parking_lot::Mutex;
-use script_traits::{WorkerGlobalScopeInit, WorkerScriptLoadOrigin};
-use servo_rand::random;
-use servo_url::{ImmutableOrigin, ServoUrl};
-use std::mem::replace;
-use std::sync::atomic::AtomicBool;
-use std::sync::Arc;
-use std::thread::{self, JoinHandle};
-use style::thread_state::{self, ThreadState};
 
 /// Set the `worker` field of a related DedicatedWorkerGlobalScope object to a particular
 /// value for the duration of this object's lifetime. This ensures that the related Worker
@@ -182,6 +185,7 @@ pub struct DedicatedWorkerGlobalScope {
     #[ignore_malloc_size_of = "Defined in std"]
     task_queue: TaskQueue<DedicatedWorkerScriptMsg>,
     #[ignore_malloc_size_of = "Defined in std"]
+    #[no_trace]
     own_sender: Sender<DedicatedWorkerScriptMsg>,
     #[ignore_malloc_size_of = "Trusted<T> has unclear ownership like Dom<T>"]
     worker: DomRefCell<Option<TrustedWorkerAddress>>,
@@ -189,11 +193,14 @@ pub struct DedicatedWorkerGlobalScope {
     /// Sender to the parent thread.
     parent_sender: Box<dyn ScriptChan + Send>,
     #[ignore_malloc_size_of = "Arc"]
+    #[no_trace]
     image_cache: Arc<dyn ImageCache>,
+    #[no_trace]
     browsing_context: Option<BrowsingContextId>,
     /// A receiver of control messages,
     /// currently only used to signal shutdown.
     #[ignore_malloc_size_of = "Channels are hard"]
+    #[no_trace]
     control_receiver: Receiver<DedicatedWorkerControlMsg>,
 }
 
@@ -378,7 +385,8 @@ impl DedicatedWorkerGlobalScope {
                     new_child_runtime(parent, Some(task_source))
                 };
 
-                let _ = context_sender.send(ContextForRequestInterrupt::new(runtime.cx()));
+                let context_for_interrupt = ContextForRequestInterrupt::new(runtime.cx());
+                let _ = context_sender.send(context_for_interrupt.clone());
 
                 let (devtools_mpsc_chan, devtools_mpsc_port) = unbounded();
                 ROUTER.route_ipc_receiver_to_crossbeam_sender(
@@ -476,7 +484,8 @@ impl DedicatedWorkerGlobalScope {
                         parent_sender,
                         CommonScriptMsg::CollectReports,
                     );
-                scope.clear_js_runtime();
+
+                scope.clear_js_runtime(context_for_interrupt);
             })
             .expect("Thread spawning failed")
     }

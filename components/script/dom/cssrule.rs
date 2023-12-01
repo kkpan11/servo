@@ -2,6 +2,12 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
+use std::cell::Cell;
+
+use dom_struct::dom_struct;
+use style::shared_lock::SharedRwLock;
+use style::stylesheets::CssRule as StyleCssRule;
+
 use crate::dom::bindings::codegen::Bindings::CSSRuleBinding::CSSRuleMethods;
 use crate::dom::bindings::inheritance::Castable;
 use crate::dom::bindings::reflector::Reflector;
@@ -17,10 +23,6 @@ use crate::dom::cssstylerule::CSSStyleRule;
 use crate::dom::cssstylesheet::CSSStyleSheet;
 use crate::dom::csssupportsrule::CSSSupportsRule;
 use crate::dom::window::Window;
-use dom_struct::dom_struct;
-use std::cell::Cell;
-use style::shared_lock::SharedRwLock;
-use style::stylesheets::CssRule as StyleCssRule;
 
 #[dom_struct]
 pub struct CSSRule {
@@ -34,7 +36,7 @@ pub struct CSSRule {
 }
 
 impl CSSRule {
-    #[allow(unrooted_must_root)]
+    #[allow(crown::unrooted_must_root)]
     pub fn new_inherited(parent_stylesheet: &CSSStyleSheet) -> CSSRule {
         CSSRule {
             reflector_: Reflector::new(),
@@ -98,11 +100,12 @@ impl CSSRule {
                 DomRoot::upcast(CSSSupportsRule::new(window, parent_stylesheet, s))
             },
             StyleCssRule::Page(_) => unreachable!(),
-            StyleCssRule::Document(_) => unimplemented!(), // TODO
-            StyleCssRule::Viewport(_) => unimplemented!(), // TODO
+            StyleCssRule::Container(_) => unimplemented!(), // TODO
+            StyleCssRule::Document(_) => unimplemented!(),  // TODO
             StyleCssRule::LayerBlock(_) => unimplemented!(), // TODO
             StyleCssRule::LayerStatement(_) => unimplemented!(), // TODO
-            StyleCssRule::ScrollTimeline(_) => unimplemented!(), // TODO
+            StyleCssRule::FontPaletteValues(_) => unimplemented!(), // TODO
+            StyleCssRule::Property(_) => unimplemented!(),  // TODO
         }
     }
 

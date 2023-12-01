@@ -5,8 +5,7 @@ authors = ["The Servo Project Developers"]
 license = "MPL-2.0"
 edition = "2018"
 publish = false
-autotests = false  # Inhibit lookup for tests/*.rs without [[test]] sections
-build = "build.rs"
+autotests = false # Inhibit lookup for tests/*.rs without [[test]] sections
 
 [lib]
 name = "net"
@@ -16,7 +15,7 @@ doctest = false
 
 [dependencies]
 async-recursion = "0.3.2"
-async-tungstenite = { version = "0.22", features = ["tokio-openssl"] }
+async-tungstenite = { workspace = true }
 base64 = { workspace = true }
 brotli = "3"
 bytes = "1"
@@ -24,18 +23,18 @@ content-security-policy = { workspace = true }
 cookie_rs = { package = "cookie", version = "0.12" }
 crossbeam-channel = { workspace = true }
 data-url = { workspace = true }
-devtools_traits = { path = "../devtools_traits" }
-embedder_traits = { path = "../embedder_traits" }
+devtools_traits = { workspace = true }
+embedder_traits = { workspace = true }
 flate2 = "1"
 futures = { version = "0.3", package = "futures" }
-futures-util = { version  = "0.3" }
+futures-util = { version = "0.3" }
 generic-array = "0.14"
 headers = { workspace = true }
 http = { workspace = true }
 hyper = { workspace = true, features = ["client", "http1", "http2", "tcp", "stream"] }
-hyper-openssl = "0.9.1"
+hyper-rustls = { workspace = true }
 hyper_serde = { workspace = true }
-immeta = "0.4"
+imsz = { workspace = true }
 ipc-channel = { workspace = true }
 lazy_static = { workspace = true }
 libflate = "0.1"
@@ -44,14 +43,14 @@ malloc_size_of = { path = "../malloc_size_of" }
 malloc_size_of_derive = { workspace = true }
 mime = { workspace = true }
 mime_guess = { workspace = true }
-msg = { path = "../msg" }
-net_traits = { path = "../net_traits" }
-openssl = "0.10"
-openssl-sys = "0.9"
+msg = { workspace = true }
+net_traits = { workspace = true }
 percent-encoding = { workspace = true }
 pixels = { path = "../pixels" }
-profile_traits = { path = "../profile_traits" }
+profile_traits = { workspace = true }
 rayon = { workspace = true }
+rustls = { workspace = true }
+rustls-pemfile = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 servo_allocator = { path = "../allocator" }
@@ -61,16 +60,16 @@ servo_url = { path = "../url" }
 sha2 = "0.10"
 time = { workspace = true }
 tokio = { workspace = true, features = ["sync", "macros", "rt-multi-thread"] }
+tokio-rustls = { workspace = true }
 tokio-stream = "0.1"
-tungstenite = "0.19"
+tungstenite = { workspace = true }
 url = { workspace = true }
 uuid = { workspace = true }
 webrender_api = { workspace = true }
+webpki-roots = { workspace = true }
 
 [dev-dependencies]
-futures = {version = "0.3", features = ["compat"]}
-std_test_override = { path = "../std_test_override" }
-tokio-openssl = "0.6"
+futures = { version = "0.3", features = ["compat"] }
 tokio-test = "0.4"
 tokio-stream = { version = "0.1", features = ["net"] }
 hyper = { workspace = true, features = ["full"] }

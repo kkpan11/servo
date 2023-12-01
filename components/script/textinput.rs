@@ -4,17 +4,19 @@
 
 //! Common handling of keyboard input and state management for text input controls
 
-use crate::clipboard_provider::ClipboardProvider;
-use crate::dom::bindings::str::DOMString;
-use crate::dom::compositionevent::CompositionEvent;
-use crate::dom::keyboardevent::KeyboardEvent;
-use keyboard_types::{Key, KeyState, Modifiers, ShortcutMatcher};
 use std::borrow::ToOwned;
 use std::cmp::min;
 use std::default::Default;
 use std::ops::{Add, AddAssign, Range};
 use std::usize;
+
+use keyboard_types::{Key, KeyState, Modifiers, ShortcutMatcher};
 use unicode_segmentation::UnicodeSegmentation;
+
+use crate::clipboard_provider::ClipboardProvider;
+use crate::dom::bindings::str::DOMString;
+use crate::dom::compositionevent::CompositionEvent;
+use crate::dom::keyboardevent::KeyboardEvent;
 
 #[derive(Clone, Copy, PartialEq)]
 pub enum Selection {
@@ -484,7 +486,7 @@ impl<T: ClipboardProvider> TextInput<T> {
                 vec![DOMString::from(to_insert)]
             };
 
-            // FIXME(ajeffrey): effecient append for DOMStrings
+            // FIXME(ajeffrey): efficient append for DOMStrings
             let mut new_line = prefix.to_owned();
 
             new_line.push_str(&insert_lines[0]);
@@ -494,7 +496,7 @@ impl<T: ClipboardProvider> TextInput<T> {
             self.edit_point.index = insert_lines[last_insert_lines_index].len_utf8();
             self.edit_point.line = start.line + last_insert_lines_index;
 
-            // FIXME(ajeffrey): effecient append for DOMStrings
+            // FIXME(ajeffrey): efficient append for DOMStrings
             insert_lines[last_insert_lines_index].push_str(suffix);
 
             let mut new_lines = vec![];

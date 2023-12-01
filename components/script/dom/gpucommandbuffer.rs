@@ -2,18 +2,19 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
+use std::collections::HashSet;
+use std::hash::{Hash, Hasher};
+
+use dom_struct::dom_struct;
+use webgpu::{WebGPU, WebGPUCommandBuffer, WebGPURequest};
+
 use crate::dom::bindings::cell::{DomRefCell, Ref};
-use crate::dom::bindings::codegen::Bindings::GPUCommandBufferBinding::GPUCommandBufferMethods;
+use crate::dom::bindings::codegen::Bindings::WebGPUBinding::GPUCommandBufferMethods;
 use crate::dom::bindings::reflector::{reflect_dom_object, Reflector};
-use crate::dom::bindings::root::Dom;
-use crate::dom::bindings::root::DomRoot;
+use crate::dom::bindings::root::{Dom, DomRoot};
 use crate::dom::bindings::str::USVString;
 use crate::dom::globalscope::GlobalScope;
 use crate::dom::gpubuffer::GPUBuffer;
-use dom_struct::dom_struct;
-use std::collections::HashSet;
-use std::hash::{Hash, Hasher};
-use webgpu::{WebGPU, WebGPUCommandBuffer, WebGPURequest};
 
 impl Eq for DomRoot<GPUBuffer> {}
 impl Hash for DomRoot<GPUBuffer> {
@@ -26,8 +27,10 @@ impl Hash for DomRoot<GPUBuffer> {
 pub struct GPUCommandBuffer {
     reflector_: Reflector,
     #[ignore_malloc_size_of = "defined in webgpu"]
+    #[no_trace]
     channel: WebGPU,
-    label: DomRefCell<Option<USVString>>,
+    label: DomRefCell<USVString>,
+    #[no_trace]
     command_buffer: WebGPUCommandBuffer,
     buffers: DomRefCell<HashSet<Dom<GPUBuffer>>>,
 }
@@ -37,7 +40,7 @@ impl GPUCommandBuffer {
         channel: WebGPU,
         command_buffer: WebGPUCommandBuffer,
         buffers: HashSet<DomRoot<GPUBuffer>>,
-        label: Option<USVString>,
+        label: USVString,
     ) -> Self {
         Self {
             channel,
@@ -53,7 +56,7 @@ impl GPUCommandBuffer {
         channel: WebGPU,
         command_buffer: WebGPUCommandBuffer,
         buffers: HashSet<DomRoot<GPUBuffer>>,
-        label: Option<USVString>,
+        label: USVString,
     ) -> DomRoot<Self> {
         reflect_dom_object(
             Box::new(GPUCommandBuffer::new_inherited(
@@ -93,12 +96,12 @@ impl GPUCommandBuffer {
 
 impl GPUCommandBufferMethods for GPUCommandBuffer {
     /// https://gpuweb.github.io/gpuweb/#dom-gpuobjectbase-label
-    fn GetLabel(&self) -> Option<USVString> {
+    fn Label(&self) -> USVString {
         self.label.borrow().clone()
     }
 
     /// https://gpuweb.github.io/gpuweb/#dom-gpuobjectbase-label
-    fn SetLabel(&self, value: Option<USVString>) {
+    fn SetLabel(&self, value: USVString) {
         *self.label.borrow_mut() = value;
     }
 }

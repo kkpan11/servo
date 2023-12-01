@@ -404,16 +404,8 @@ test(t => {
       'invalid coded height');
   assert_throws_js(
       TypeError,
-      () => constructFrame({timestamp: 1234, codedWidth: 4, codedHeight: 1}),
-      'odd coded height');
-  assert_throws_js(
-      TypeError,
       () => constructFrame({timestamp: 1234, codedWidth: 0, codedHeight: 4}),
       'invalid coded width');
-  assert_throws_js(
-      TypeError,
-      () => constructFrame({timestamp: 1234, codedWidth: 3, codedHeight: 2}),
-      'odd coded width');
   assert_throws_js(
       TypeError, () => constructFrame({
                    timestamp: 1234,
@@ -517,11 +509,11 @@ test(t => {
     1, 2,                    // v
   ]);
   let frame = new VideoFrame(data, vfInit);
-  assert_true(frame.colorSpace.primaries == null, 'color primaries');
-  assert_true(frame.colorSpace.transfer == null, 'color transfer');
-  assert_true(frame.colorSpace.matrix == null, 'color matrix');
-  assert_true(frame.colorSpace.fullRange == null, 'color range');
-}, 'Test planar constructed I420 VideoFrame with null colorSpace values');
+  assert_true(frame.colorSpace.primaries !== undefined, 'color primaries');
+  assert_true(frame.colorSpace.transfer !== undefined, 'color transfer');
+  assert_true(frame.colorSpace.matrix !== undefined, 'color matrix');
+  assert_true(frame.colorSpace.fullRange !== undefined, 'color range');
+}, 'Test planar can construct I420 VideoFrame with null colorSpace values');
 
 test(t => {
   let fmt = 'I420A';

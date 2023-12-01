@@ -2,8 +2,12 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
+use dom_struct::dom_struct;
+use js::rust::HandleObject;
+use servo_atoms::Atom;
+
 use crate::dom::audiotrack::AudioTrack;
-use crate::dom::bindings::codegen::Bindings::EventBinding::EventBinding::EventMethods;
+use crate::dom::bindings::codegen::Bindings::EventBinding::Event_Binding::EventMethods;
 use crate::dom::bindings::codegen::Bindings::TrackEventBinding;
 use crate::dom::bindings::codegen::Bindings::TrackEventBinding::TrackEventMethods;
 use crate::dom::bindings::codegen::UnionTypes::VideoTrackOrAudioTrackOrTextTrack;
@@ -17,11 +21,8 @@ use crate::dom::globalscope::GlobalScope;
 use crate::dom::texttrack::TextTrack;
 use crate::dom::videotrack::VideoTrack;
 use crate::dom::window::Window;
-use dom_struct::dom_struct;
-use js::rust::HandleObject;
-use servo_atoms::Atom;
 
-#[unrooted_must_root_lint::must_root]
+#[crown::unrooted_must_root_lint::must_root]
 #[derive(JSTraceable, MallocSizeOf)]
 enum MediaTrack {
     Video(Dom<VideoTrack>),
@@ -37,7 +38,7 @@ pub struct TrackEvent {
 
 #[allow(non_snake_case)]
 impl TrackEvent {
-    #[allow(unrooted_must_root)]
+    #[allow(crown::unrooted_must_root)]
     fn new_inherited(track: &Option<VideoTrackOrAudioTrackOrTextTrack>) -> TrackEvent {
         let media_track = match track {
             Some(VideoTrackOrAudioTrackOrTextTrack::VideoTrack(VideoTrack)) => {

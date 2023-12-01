@@ -2,13 +2,10 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
-use crate::font::{
-    FontHandleMethods, FontMetrics, FontTableMethods, FontTableTag, FractionalPixel,
-};
-use crate::font::{GPOS, GSUB, KERN};
-use crate::platform::font_template::FontTemplateData;
-use crate::platform::macos::font_context::FontContextHandle;
-use crate::text::glyph::GlyphId;
+use std::ops::Range;
+use std::sync::Arc;
+use std::{fmt, ptr};
+
 /// Implementation of Quartz (CoreGraphics) fonts.
 use app_units::Au;
 use byteorder::{BigEndian, ByteOrder};
@@ -18,13 +15,20 @@ use core_foundation::string::UniChar;
 use core_graphics::font::CGGlyph;
 use core_graphics::geometry::CGRect;
 use core_text::font::CTFont;
-use core_text::font_descriptor::kCTFontDefaultOrientation;
-use core_text::font_descriptor::{SymbolicTraitAccessors, TraitAccessors};
+use core_text::font_descriptor::{
+    kCTFontDefaultOrientation, SymbolicTraitAccessors, TraitAccessors,
+};
+use log::debug;
 use servo_atoms::Atom;
-use std::ops::Range;
-use std::sync::Arc;
-use std::{fmt, ptr};
 use style::values::computed::font::{FontStretch, FontStyle, FontWeight};
+
+use crate::font::{
+    FontHandleMethods, FontMetrics, FontTableMethods, FontTableTag, FractionalPixel, GPOS, GSUB,
+    KERN,
+};
+use crate::platform::font_template::FontTemplateData;
+use crate::platform::macos::font_context::FontContextHandle;
+use crate::text::glyph::GlyphId;
 
 const KERN_PAIR_LEN: usize = 6;
 
@@ -203,11 +207,10 @@ impl FontHandleMethods for FontHandle {
     }
 
     fn style(&self) -> FontStyle {
-        use style::values::generics::font::FontStyle::*;
         if self.ctfont.symbolic_traits().is_italic() {
-            Italic
+            FontStyle::ITALIC
         } else {
-            Normal
+            FontStyle::NORMAL
         }
     }
 
@@ -221,15 +224,12 @@ impl FontHandleMethods for FontHandle {
         } else {
             4.0 + normalized * 5.0 // [4.0, 9.0]
         }; // [1.0, 9.0], centered on 4.0
-        FontWeight(normalized as f32 * 100.)
+        FontWeight::from_float(normalized as f32 * 100.)
     }
 
     fn stretchiness(&self) -> FontStretch {
-        use style::values::computed::Percentage;
-        use style::values::generics::NonNegative;
-
         let normalized = self.ctfont.all_traits().normalized_width(); // [-1.0, 1.0]
-        FontStretch(NonNegative(Percentage(normalized as f32 + 1.0)))
+        FontStretch::from_percentage(normalized as f32 + 1.0)
     }
 
     fn glyph_index(&self, codepoint: char) -> Option<GlyphId> {

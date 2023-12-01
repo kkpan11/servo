@@ -7,11 +7,14 @@
 //! retrieve an array (CPREFS) of struct of pointers (CPrefs) to the C-compatible preferences
 //! (LocalCPref).
 
-use crate::simpleservo::{self, PrefValue};
 use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap};
 use std::ffi::{CStr, CString};
 use std::os::raw::{c_char, c_void};
+
+use log::debug;
+
+use crate::simpleservo::{self, PrefValue};
 
 thread_local! {
     // CPREFS keeps alive a set of CPref that are sent over to the embedder.
@@ -41,7 +44,7 @@ impl LocalCPrefValue {
         match v {
             PrefValue::Float(v) => LocalCPrefValue::Float(*v),
             PrefValue::Int(v) => LocalCPrefValue::Int(*v),
-            PrefValue::Str(v) => LocalCPrefValue::Str(CString::new(v.clone()).unwrap()),
+            PrefValue::Str(v) => LocalCPrefValue::Str(CString::new(v.as_bytes()).unwrap()),
             PrefValue::Bool(v) => LocalCPrefValue::Bool(*v),
             PrefValue::Missing => LocalCPrefValue::Missing,
         }
@@ -203,7 +206,7 @@ pub extern "C" fn get_prefs() -> CPrefList {
         .into_iter()
         .map(|(key, (value, is_default))| {
             let l = Box::new(LocalCPref {
-                key: CString::new(key.clone()).unwrap(),
+                key: CString::new(key.as_bytes()).unwrap(),
                 value: LocalCPrefValue::new(&value),
                 is_default: is_default,
             });

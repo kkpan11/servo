@@ -7,8 +7,6 @@
 # option. This file may not be copied, modified, or distributed
 # except according to those terms.
 
-from __future__ import print_function, unicode_literals
-
 import argparse
 import logging
 import re
@@ -33,12 +31,10 @@ from mach.decorators import (
     Command,
 )
 
-import servo.util
 import tidy
 
-from servo.command_base import CommandBase, call, check_call
+from servo.command_base import BuildType, CommandBase, call, check_call
 from servo.util import delete
-from distutils.dir_util import copy_tree
 
 SCRIPT_PATH = os.path.split(__file__)[0]
 PROJECT_TOPLEVEL_PATH = os.path.abspath(os.path.join(SCRIPT_PATH, "..", ".."))
@@ -56,6 +52,18 @@ TEST_SUITES = OrderedDict([
 ])
 
 TEST_SUITES_BY_PREFIX = {path: k for k, v in TEST_SUITES.items() if "paths" in v for path in v["paths"]}
+
+
+def format_toml_files_with_taplo(check_only: bool = True) -> int:
+    taplo = shutil.which("taplo")
+    if taplo is None:
+        print("Could not find `taplo`. Run `./mach bootstrap` or `cargo install taplo-cli --locked`")
+        return 1
+
+    if check_only:
+        return call([taplo, "fmt", "--check"], env={'RUST_LOG': 'error'})
+    else:
+        return call([taplo, "fmt"], env={'RUST_LOG': 'error'})
 
 
 @CommandProvider
@@ -166,8 +174,8 @@ class MachCommands(CommandBase):
                      help="Run in bench mode")
     @CommandArgument('--nocapture', default=False, action="store_true",
                      help="Run tests with nocapture ( show test stdout )")
-    @CommandBase.build_like_command_arguments
-    def test_unit(self, test_name=None, package=None, bench=False, nocapture=False, with_layout_2020=False, **kwargs):
+    @CommandBase.common_command_arguments(build_configuration=True, build_type=True)
+    def test_unit(self, build_type: BuildType, test_name=None, package=None, bench=False, nocapture=False, **kwargs):
         if test_name is None:
             test_name = []
 
@@ -198,8 +206,11 @@ class MachCommands(CommandBase):
                 test_patterns.append(test)
 
         self_contained_tests = [
+            "servoshell",
             "background_hang_monitor",
             "gfx",
+            "layout_2013",
+            "layout_2020",
             "msg",
             "net",
             "net_traits",
@@ -207,11 +218,8 @@ class MachCommands(CommandBase):
             "script_traits",
             "servo_config",
             "servo_remutex",
+            "crown",
         ]
-        if with_layout_2020:
-            self_contained_tests.append("layout_2020")
-        else:
-            self_contained_tests.append("layout_2013")
         if not packages:
             packages = set(os.listdir(path.join(self.context.topdir, "tests", "unit"))) - set(['.DS_Store'])
             packages |= set(self_contained_tests)
@@ -232,6 +240,14 @@ class MachCommands(CommandBase):
 
         # Gather Cargo build timings (https://doc.rust-lang.org/cargo/reference/timings.html).
         args = ["--timings"]
+
+        if build_type.is_release():
+            args += ["--release"]
+        elif build_type.is_dev():
+            pass  # there is no argument for debug
+        else:
+            args += ["--profile", build_type.profile]
+
         for crate in packages:
             args += ["-p", "%s_tests" % crate]
         for crate in in_crate_packages:
@@ -244,18 +260,10 @@ class MachCommands(CommandBase):
         # We are setting is_build here to true, because running `cargo test` can trigger builds.
         env = self.build_env(is_build=True)
 
-        # on MSVC, we need some DLLs in the path. They were copied
-        # in to the servo.exe build dir, so just point PATH to that.
-        # TODO(mrobinson): This should be removed entirely.
-        if "msvc" in servo.platform.host_triple():
-            servo.util.prepend_paths_to_env(
-                env, "PATH", path.dirname(self.get_binary_path(False, False)))
-
         return self.run_cargo_build_like_command(
             "bench" if bench else "test",
             args,
             env=env,
-            with_layout_2020=with_layout_2020,
             **kwargs)
 
     @Command('test-content',
@@ -265,14 +273,6 @@ class MachCommands(CommandBase):
         print("Content tests have been replaced by web-platform-tests under "
               "tests/wpt/mozilla/.")
         return 0
-
-    def install_rustfmt(self):
-        self.ensure_bootstrapped()
-        with open(os.devnull, "w") as devnull:
-            if self.call_rustup_run(["cargo", "fmt", "--version", "-q"],
-                                    stderr=devnull) != 0:
-                # Rustfmt is not installed. Install:
-                self.call_rustup_run(["rustup", "component", "add", "rustfmt-preview"])
 
     @Command('test-tidy',
              description='Run the source code tidiness check',
@@ -292,13 +292,14 @@ class MachCommands(CommandBase):
         else:
             manifest_dirty = wpt.manifestupdate.update(check_clean=True)
         tidy_failed = tidy.scan(not all_files, not no_progress, stylo=stylo, no_wpt=no_wpt)
-        self.install_rustfmt()
-        rustfmt_failed = self.call_rustup_run(["cargo", "fmt", "--", "--check"])
+        rustfmt_failed = call(["cargo", "fmt", "--", "--check"])
 
         if rustfmt_failed:
             print("Run `./mach fmt` to fix the formatting")
 
-        return tidy_failed or manifest_dirty or rustfmt_failed
+        taplo_failed = format_toml_files_with_taplo()
+
+        return tidy_failed or manifest_dirty or rustfmt_failed or taplo_failed
 
     @Command('test-scripts',
              description='Run tests for all build and support scripts.',
@@ -344,57 +345,42 @@ class MachCommands(CommandBase):
              description='Run the tests harness that verifies that the test failures are reported correctly',
              category='testing',
              parser=wpt.create_parser)
-    def test_wpt_failure(self, **kwargs):
+    @CommandBase.common_command_arguments(build_configuration=False, build_type=True)
+    def test_wpt_failure(self, build_type: BuildType, **kwargs):
         kwargs["pause_after_test"] = False
         kwargs["include"] = ["infrastructure/failing-test.html"]
-        return not self._test_wpt(**kwargs)
+        return not self._test_wpt(build_type=build_type, **kwargs)
 
     @Command('test-wpt',
              description='Run the regular web platform test suite',
              category='testing',
              parser=wpt.create_parser)
-    def test_wpt(self, **kwargs):
-        ret = self.run_test_list_or_dispatch(kwargs["test_list"], "wpt", self._test_wpt, **kwargs)
-        if kwargs["always_succeed"]:
-            return 0
-        else:
-            return ret
+    @CommandBase.common_command_arguments(build_configuration=False, build_type=True)
+    def test_wpt(self, build_type: BuildType, **kwargs):
+        return self._test_wpt(build_type=build_type, **kwargs)
 
     @Command('test-wpt-android',
              description='Run the web platform test suite in an Android emulator',
              category='testing',
              parser=wpt.create_parser)
-    def test_wpt_android(self, release=False, dev=False, binary_args=None, **kwargs):
+    @CommandBase.common_command_arguments(build_configuration=False, build_type=True)
+    def test_wpt_android(self, build_type: BuildType, binary_args=None, **kwargs):
         kwargs.update(
-            release=release,
-            dev=dev,
             product="servodriver",
             processes=1,
-            binary_args=self.in_android_emulator(release, dev) + (binary_args or []),
+            binary_args=self.in_android_emulator(build_type) + (binary_args or []),
             binary=sys.executable,
         )
-        return self._test_wpt(android=True, **kwargs)
+        return self._test_wpt(build_type=build_type, android=True, **kwargs)
 
-    def _test_wpt(self, android=False, **kwargs):
+    def _test_wpt(self, build_type: BuildType, android=False, **kwargs):
         if not android:
             os.environ.update(self.build_env())
-        return wpt.run.run_tests(**kwargs)
 
-    # Helper to ensure all specified paths are handled, otherwise dispatch to appropriate test suite.
-    def run_test_list_or_dispatch(self, requested_paths, correct_suite, correct_function, **kwargs):
-        if not requested_paths:
-            return correct_function(**kwargs)
-        # Paths specified on command line. Ensure they can be handled, re-dispatch otherwise.
-        all_handled = True
-        for test_path in requested_paths:
-            suite = self.suite_for_path(test_path)
-            if suite is not None and correct_suite != suite:
-                all_handled = False
-                print("Warning: %s is not a %s test. Delegating to test-%s." % (test_path, correct_suite, suite))
-        if all_handled:
-            return correct_function(**kwargs)
-        # Dispatch each test to the correct suite via test()
-        Registrar.dispatch("test", context=self.context, params=requested_paths)
+        # TODO(mrobinson): Why do we pass the wrong binary path in when running WPT on Android?
+        binary_path = self.get_binary_path(build_type=build_type)
+        return_value = wpt.run.run_tests(binary_path, **kwargs)
+        return return_value if not kwargs["always_succeed"] else 0
 
     @Command('update-manifest',
              description='Run test-wpt --manifest-update SKIP_TESTS to regenerate MANIFEST.json',
@@ -404,11 +390,13 @@ class MachCommands(CommandBase):
         return wpt.manifestupdate.update(check_clean=False)
 
     @Command('fmt',
-             description='Format the Rust and CPP source files with rustfmt',
+             description='Format Rust and TOML files',
              category='testing')
     def format_code(self):
-        self.install_rustfmt()
-        return self.call_rustup_run(["cargo", "fmt"])
+        result = format_toml_files_with_taplo(check_only=False)
+        if result != 0:
+            return result
+        return call(["cargo", "fmt"])
 
     @Command('update-wpt',
              description='Update the web platform tests',
@@ -424,18 +412,15 @@ class MachCommands(CommandBase):
     @Command('test-android-startup',
              description='Extremely minimal testing of Servo for Android',
              category='testing')
-    @CommandArgument('--release', '-r', action='store_true',
-                     help='Run the release build')
-    @CommandArgument('--dev', '-d', action='store_true',
-                     help='Run the dev build')
-    def test_android_startup(self, release, dev):
+    @CommandBase.common_command_arguments(build_configuration=False, build_type=True)
+    def test_android_startup(self, build_type: BuildType):
         html = """
             <script>
                 window.alert("JavaScript is running!")
             </script>
         """
         url = "data:text/html;base64," + html.encode("base64").replace("\n", "")
-        args = self.in_android_emulator(release, dev)
+        args = self.in_android_emulator(build_type)
         args = [sys.executable] + args + [url]
         process = subprocess.Popen(args, stdout=subprocess.PIPE)
         try:
@@ -450,11 +435,7 @@ class MachCommands(CommandBase):
         finally:
             process.terminate()
 
-    def in_android_emulator(self, release, dev):
-        if (release and dev) or not (release or dev):
-            print("Please specify one of --dev or --release.")
-            sys.exit(1)
-
+    def in_android_emulator(self, build_type: BuildType):
         avd = "servo-x86"
         target = "i686-linux-android"
         print("Assuming --target " + target)
@@ -463,42 +444,28 @@ class MachCommands(CommandBase):
         env = self.build_env()
         os.environ["PATH"] = env["PATH"]
         assert self.setup_configuration_for_android_target(target)
-        apk = self.get_apk_path(release)
+        apk = self.get_apk_path(build_type)
 
         py = path.join(self.context.topdir, "etc", "run_in_headless_android_emulator.py")
         return [py, avd, apk]
 
-    @Command('test-jquery',
-             description='Run the jQuery test suite',
-             category='testing')
-    @CommandArgument('--release', '-r', action='store_true',
-                     help='Run the release build')
-    @CommandArgument('--dev', '-d', action='store_true',
-                     help='Run the dev build')
-    def test_jquery(self, release, dev):
-        return self.jquery_test_runner("test", release, dev)
+    @Command('test-jquery', description='Run the jQuery test suite', category='testing')
+    @CommandBase.common_command_arguments(build_configuration=False, build_type=True)
+    def test_jquery(self, build_type: BuildType):
+        return self.jquery_test_runner("test", build_type)
 
-    @Command('test-dromaeo',
-             description='Run the Dromaeo test suite',
-             category='testing')
-    @CommandArgument('tests', default=["recommended"], nargs="...",
-                     help="Specific tests to run")
-    @CommandArgument('--release', '-r', action='store_true',
-                     help='Run the release build')
-    @CommandArgument('--dev', '-d', action='store_true',
-                     help='Run the dev build')
-    def test_dromaeo(self, tests, release, dev):
-        return self.dromaeo_test_runner(tests, release, dev)
+    @Command('test-dromaeo', description='Run the Dromaeo test suite', category='testing')
+    @CommandArgument('tests', default=["recommended"], nargs="...", help="Specific tests to run")
+    @CommandBase.common_command_arguments(build_configuration=False, build_type=True)
+    def test_dromaeo(self, tests, build_type: BuildType):
+        return self.dromaeo_test_runner(tests, build_type)
 
     @Command('update-jquery',
              description='Update the jQuery test suite expected results',
              category='testing')
-    @CommandArgument('--release', '-r', action='store_true',
-                     help='Run the release build')
-    @CommandArgument('--dev', '-d', action='store_true',
-                     help='Run the dev build')
-    def update_jquery(self, release, dev):
-        return self.jquery_test_runner("update", release, dev)
+    @CommandBase.common_command_arguments(build_configuration=False, build_type=True)
+    def update_jquery(self, build_type: BuildType):
+        return self.jquery_test_runner("update", build_type)
 
     @Command('compare_dromaeo',
              description='Compare outputs of two runs of ./mach test-dromaeo command',
@@ -556,7 +523,7 @@ class MachCommands(CommandBase):
                     print("{}|{}|{}|{}".format(a1.ljust(width_col1), str(b1).ljust(width_col2),
                           str(c1).ljust(width_col3), str(d1).ljust(width_col4)))
 
-    def jquery_test_runner(self, cmd, release, dev):
+    def jquery_test_runner(self, cmd, build_type: BuildType):
         base_dir = path.abspath(path.join("tests", "jquery"))
         jquery_dir = path.join(base_dir, "jquery")
         run_file = path.join(base_dir, "run_jquery.py")
@@ -571,11 +538,11 @@ class MachCommands(CommandBase):
             ["git", "-C", jquery_dir, "pull"])
 
         # Check that a release servo build exists
-        bin_path = path.abspath(self.get_binary_path(release, dev))
+        bin_path = path.abspath(self.get_binary_path(build_type))
 
         return call([run_file, cmd, bin_path, base_dir])
 
-    def dromaeo_test_runner(self, tests, release, dev):
+    def dromaeo_test_runner(self, tests, build_type: BuildType):
         base_dir = path.abspath(path.join("tests", "dromaeo"))
         dromaeo_dir = path.join(base_dir, "dromaeo")
         run_file = path.join(base_dir, "run_dromaeo.py")
@@ -594,7 +561,7 @@ class MachCommands(CommandBase):
             ["make", "-C", dromaeo_dir, "web"])
 
         # Check that a release servo build exists
-        bin_path = path.abspath(self.get_binary_path(release, dev))
+        bin_path = path.abspath(self.get_binary_path(build_type))
 
         return check_call(
             [run_file, "|".join(tests), bin_path, base_dir])
@@ -819,6 +786,8 @@ tests/wpt/mozilla/tests for Servo-only tests""" % reference_path)
         res = call(["npm", "run", "wpt"], cwd=clone_dir)
         if res != 0:
             return res
+        # https://github.com/gpuweb/cts/pull/2770
+        delete(path.join(clone_dir, "out-wpt", "cts-chunked2sec.https.html"))
         cts_html = path.join(clone_dir, "out-wpt", "cts.https.html")
         # patch
         with open(cts_html, 'r') as file:
@@ -830,9 +799,9 @@ tests/wpt/mozilla/tests for Servo-only tests""" % reference_path)
             file.write(filedata)
         # copy
         delete(path.join(tdir, "webgpu"))
-        copy_tree(path.join(clone_dir, "out-wpt"), path.join(tdir, "webgpu"))
+        shutil.copytree(path.join(clone_dir, "out-wpt"), path.join(tdir, "webgpu"))
         # update commit
-        commit = subprocess.check_output(["git", "rev-parse", "HEAD"]).decode()
+        commit = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=clone_dir).decode()
         with open(path.join(tdir, "checkout_commit.txt"), 'w') as file:
             file.write(commit)
         # clean up
@@ -845,10 +814,10 @@ tests/wpt/mozilla/tests for Servo-only tests""" % reference_path)
              category='testing')
     @CommandArgument('params', nargs='...',
                      help="Command-line arguments to be passed through to Servo")
-    def smoketest(self, params):
+    @CommandBase.common_command_arguments(build_configuration=False, build_type=True)
+    def smoketest(self, build_type: BuildType, params):
         # We pass `-f` here so that any thread panic will cause Servo to exit,
         # preventing a panic from hanging execution. This means that these kind
         # of panics won't cause timeouts on CI.
-        params = params + ['-f', 'tests/html/close-on-load.html']
-        return self.context.commands.dispatch(
-            'run', self.context, params=params)
+        return self.context.commands.dispatch('run', self.context, build_type=build_type,
+                                              params=params + ['-f', 'tests/html/close-on-load.html'])

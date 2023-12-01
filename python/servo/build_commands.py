@@ -7,8 +7,6 @@
 # option. This file may not be copied, modified, or distributed
 # except according to those terms.
 
-from __future__ import print_function, unicode_literals
-
 import datetime
 import locale
 import os
@@ -35,21 +33,13 @@ from mach.registrar import Registrar
 import servo.platform
 import servo.util
 
-from servo.command_base import CommandBase, call, check_call
+from servo.command_base import BuildType, CommandBase, call, check_call
 from servo.gstreamer import windows_dlls, windows_plugins, macos_plugins
 
 
 @CommandProvider
 class MachCommands(CommandBase):
-    @Command('build',
-             description='Build Servo',
-             category='build')
-    @CommandArgument('--release', '-r',
-                     action='store_true',
-                     help='Build in release mode')
-    @CommandArgument('--dev', '-d',
-                     action='store_true',
-                     help='Build in development mode')
+    @Command('build', description='Build Servo', category='build')
     @CommandArgument('--jobs', '-j',
                      default=None,
                      help='Number of jobs to run in parallel')
@@ -64,41 +54,18 @@ class MachCommands(CommandBase):
                      help='Print very verbose output')
     @CommandArgument('params', nargs='...',
                      help="Command-line arguments to be passed through to Cargo")
-    @CommandBase.build_like_command_arguments
-    def build(self, release=False, dev=False, jobs=None, params=None, no_package=False,
+    @CommandBase.common_command_arguments(build_configuration=True, build_type=True)
+    def build(self, build_type: BuildType, jobs=None, params=None, no_package=False,
               verbose=False, very_verbose=False, libsimpleservo=False, **kwargs):
         opts = params or []
         has_media_stack = "media-gstreamer" in self.features
 
-        release_path = path.join(self.target_path, "release", "servo")
-        dev_path = path.join(self.target_path, "debug", "servo")
-
-        release_exists = path.exists(release_path)
-        dev_exists = path.exists(dev_path)
-
-        if not (release or dev):
-            if self.config["build"]["mode"] == "dev":
-                dev = True
-            elif self.config["build"]["mode"] == "release":
-                release = True
-            elif release_exists and not dev_exists:
-                release = True
-            elif dev_exists and not release_exists:
-                dev = True
-            else:
-                print("Please specify either --dev (-d) for a development")
-                print("  build, or --release (-r) for an optimized build.")
-                sys.exit(1)
-
-        if release and dev:
-            print("Please specify either --dev or --release.")
-            sys.exit(1)
-
-        if release:
+        if build_type.is_release():
             opts += ["--release"]
-            servo_path = release_path
+        elif build_type.is_dev():
+            pass  # there is no argument for debug
         else:
-            servo_path = dev_path
+            opts += ["--profile", build_type.profile]
 
         if jobs is not None:
             opts += ["-j", jobs]
@@ -114,15 +81,10 @@ class MachCommands(CommandBase):
         build_start = time()
 
         host = servo.platform.host_triple()
-        target_triple = self.cross_compile_target or servo.platform.host_triple()
-        if 'apple-darwin' in host and target_triple == host:
-            if 'CXXFLAGS' not in env:
-                env['CXXFLAGS'] = ''
-            env["CXXFLAGS"] += "-mmacosx-version-min=10.10"
-
         if 'windows' in host:
             vs_dirs = self.vs_dirs()
 
+        target_triple = self.cross_compile_target or servo.platform.host_triple()
         if host != target_triple and 'windows' in target_triple:
             if os.environ.get('VisualStudioVersion') or os.environ.get('VCINSTALLDIR'):
                 print("Can't cross-compile for Windows inside of a Visual Studio shell.\n"
@@ -176,27 +138,21 @@ class MachCommands(CommandBase):
                     flavor = "googlevr"
                 elif "oculusvr" in self.features:
                     flavor = "oculusvr"
-                rv = Registrar.dispatch("package", context=self.context,
-                                        release=release, dev=dev, target=self.cross_compile_target,
-                                        flavor=flavor)
+                rv = Registrar.dispatch("package", context=self.context, build_type=build_type,
+                                        target=self.cross_compile_target, flavor=flavor)
                 if rv:
                     return rv
 
             if sys.platform == "win32":
                 servo_exe_dir = os.path.dirname(
-                    self.get_binary_path(release, dev, target=self.cross_compile_target, simpleservo=libsimpleservo)
+                    self.get_binary_path(build_type, target=self.cross_compile_target, simpleservo=libsimpleservo)
                 )
                 assert os.path.exists(servo_exe_dir)
-
-                # on msvc, we need to copy in some DLLs in to the servo.exe dir and the directory for unit tests.
-                for ssl_lib in ["libssl.dll", "libcrypto.dll"]:
-                    ssl_path = path.join(env['OPENSSL_LIB_DIR'], "../bin", ssl_lib)
-                    shutil.copy(ssl_path, servo_exe_dir)
-                    shutil.copy(ssl_path, path.join(servo_exe_dir, "deps"))
 
                 build_path = path.join(servo_exe_dir, "build")
                 assert os.path.exists(build_path)
 
+                # on msvc, we need to copy in some DLLs in to the servo.exe dir and the directory for unit tests.
                 def package_generated_shared_libraries(libs, build_path, servo_exe_dir):
                     for root, dirs, files in os.walk(build_path):
                         remaining_libs = list(libs)
@@ -229,7 +185,7 @@ class MachCommands(CommandBase):
 
             elif sys.platform == "darwin":
                 servo_path = self.get_binary_path(
-                    release, dev, target=self.cross_compile_target, simpleservo=libsimpleservo)
+                    build_type, target=self.cross_compile_target, simpleservo=libsimpleservo)
                 servo_bin_dir = os.path.dirname(servo_path)
                 assert os.path.exists(servo_bin_dir)
 
@@ -237,12 +193,6 @@ class MachCommands(CommandBase):
                     print("Packaging gstreamer dylibs")
                     if not package_gstreamer_dylibs(self.cross_compile_target, servo_path):
                         return 1
-
-                    # On Mac we use the relocatable dylibs from offical gstreamer
-                    # .pkg distribution. We need to add an LC_RPATH to the servo binary
-                    # to allow the dynamic linker to be able to locate these dylibs
-                    # See `man dyld` for more info
-                    add_rpath_to_binary(servo_path, "@executable_path/lib/")
 
                 # On the Mac, set a lovely icon. This makes it easier to pick out the Servo binary in tools
                 # like Instruments.app.
@@ -270,16 +220,6 @@ class MachCommands(CommandBase):
     def download_and_build_android_dependencies_if_needed(self, env: Dict[str, str]):
         if not self.is_android_build:
             return
-
-        openssl_dir = os.path.join(self.target_path, "native", "openssl")
-        if not os.path.exists(openssl_dir):
-            os.makedirs(openssl_dir)
-        shutil.copy(os.path.join(self.android_support_dir(), "openssl.makefile"), openssl_dir)
-        shutil.copy(os.path.join(self.android_support_dir(), "openssl.sh"), openssl_dir)
-
-        status = call(["make", "-f", "openssl.makefile"], env=env, cwd=openssl_dir)
-        if status:
-            return status
 
         # Build the name of the package containing all GStreamer dependencies
         # according to the build target.
@@ -404,14 +344,6 @@ def change_link_name(binary, old, new):
     install_name_tool(binary, '-change', old, f"@executable_path/{new}")
 
 
-def add_rpath_to_binary(binary, relative_path):
-    install_name_tool(binary, "-add_rpath", relative_path)
-
-
-def change_rpath_in_binary(binary, old, new):
-    install_name_tool(binary, "-rpath", old, new)
-
-
 def is_system_library(lib):
     return lib.startswith("/System/Library") or lib.startswith("/usr/lib")
 
@@ -460,17 +392,6 @@ def copy_dependencies(binary_path, lib_path, gst_root):
             if is_system_library(f):
                 continue
             full_path = resolve_rpath(f, gst_root)
-            # fixme(mukilan): this is a temporary solution to a bug
-            # in the official gstreamer packages. Few gstreamer dylibs
-            # like 'libavcodec.59.dylib' have absolute paths to liblzma
-            # instead of @rpath based to be relocatable. The homebrew
-            # prefix is configurable in general and is /opt/homebrew
-            # on Apple Silicon
-            if full_path == "/usr/local/opt/xz/lib/liblzma.5.dylib" and (
-                    not path.exists("/usr/local/opt/xz")
-                    and path.exists("/opt/homebrew/")):
-                full_path = "/opt/homebrew/lib/liblzma.5.dylib"
-
             need_relinked = set(otool(full_path))
             new_path = path.join(lib_path, path.basename(full_path))
             if not path.exists(new_path):

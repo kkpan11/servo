@@ -2,46 +2,50 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
-use crate::ContainingBlock;
 use std::fmt;
 use std::ops::{Add, AddAssign, Sub};
-use style::logical_geometry::{BlockFlowDirection, InlineBaseDirection};
-use style::logical_geometry::{PhysicalCorner, WritingMode};
+
+use app_units::Au;
+use serde::Serialize;
+use style::logical_geometry::{
+    BlockFlowDirection, InlineBaseDirection, PhysicalCorner, WritingMode,
+};
 use style::values::computed::{Length, LengthPercentage};
 use style::values::generics::length::GenericLengthPercentageOrAuto as AutoOr;
 use style::Zero;
 use style_traits::CSSPixel;
+
+use crate::ContainingBlock;
 
 pub type PhysicalPoint<U> = euclid::Point2D<U, CSSPixel>;
 pub type PhysicalSize<U> = euclid::Size2D<U, CSSPixel>;
 pub type PhysicalRect<U> = euclid::Rect<U, CSSPixel>;
 pub type PhysicalSides<U> = euclid::SideOffsets2D<U, CSSPixel>;
 pub type LengthOrAuto = AutoOr<Length>;
+pub type AuOrAuto = AutoOr<Au>;
 pub type LengthPercentageOrAuto<'a> = AutoOr<&'a LengthPercentage>;
 
-pub mod flow_relative {
-    #[derive(Clone, Serialize)]
-    pub struct Vec2<T> {
-        pub inline: T,
-        pub block: T,
-    }
-
-    #[derive(Clone, Serialize)]
-    pub struct Rect<T> {
-        pub start_corner: Vec2<T>,
-        pub size: Vec2<T>,
-    }
-
-    #[derive(Clone, Serialize)]
-    pub struct Sides<T> {
-        pub inline_start: T,
-        pub inline_end: T,
-        pub block_start: T,
-        pub block_end: T,
-    }
+#[derive(Clone, Serialize)]
+pub struct LogicalVec2<T> {
+    pub inline: T,
+    pub block: T,
 }
 
-impl<T: fmt::Debug> fmt::Debug for flow_relative::Vec2<T> {
+#[derive(Clone, Serialize)]
+pub struct LogicalRect<T> {
+    pub start_corner: LogicalVec2<T>,
+    pub size: LogicalVec2<T>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct LogicalSides<T> {
+    pub inline_start: T,
+    pub inline_end: T,
+    pub block_start: T,
+    pub block_end: T,
+}
+
+impl<T: fmt::Debug> fmt::Debug for LogicalVec2<T> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         // Not using f.debug_struct on purpose here, to keep {:?} output somewhat compact
         f.write_str("Vec2 { i: ")?;
@@ -52,7 +56,7 @@ impl<T: fmt::Debug> fmt::Debug for flow_relative::Vec2<T> {
     }
 }
 
-impl<T: Clone> flow_relative::Vec2<T> {
+impl<T: Clone> LogicalVec2<T> {
     pub fn from_physical_size(physical_size: &PhysicalSize<T>, mode: WritingMode) -> Self {
         // https://drafts.csswg.org/css-writing-modes/#logical-to-physical
         let (i, b) = if mode.is_horizontal() {
@@ -60,75 +64,75 @@ impl<T: Clone> flow_relative::Vec2<T> {
         } else {
             (&physical_size.height, &physical_size.width)
         };
-        flow_relative::Vec2 {
+        LogicalVec2 {
             inline: i.clone(),
             block: b.clone(),
         }
     }
 }
 
-impl<T> Add<&'_ flow_relative::Vec2<T>> for &'_ flow_relative::Vec2<T>
+impl<T> Add<&'_ LogicalVec2<T>> for &'_ LogicalVec2<T>
 where
     T: Add<Output = T> + Copy,
 {
-    type Output = flow_relative::Vec2<T>;
+    type Output = LogicalVec2<T>;
 
-    fn add(self, other: &'_ flow_relative::Vec2<T>) -> Self::Output {
-        flow_relative::Vec2 {
+    fn add(self, other: &'_ LogicalVec2<T>) -> Self::Output {
+        LogicalVec2 {
             inline: self.inline + other.inline,
             block: self.block + other.block,
         }
     }
 }
 
-impl<T> Sub<&'_ flow_relative::Vec2<T>> for &'_ flow_relative::Vec2<T>
+impl<T> Sub<&'_ LogicalVec2<T>> for &'_ LogicalVec2<T>
 where
     T: Sub<Output = T> + Copy,
 {
-    type Output = flow_relative::Vec2<T>;
+    type Output = LogicalVec2<T>;
 
-    fn sub(self, other: &'_ flow_relative::Vec2<T>) -> Self::Output {
-        flow_relative::Vec2 {
+    fn sub(self, other: &'_ LogicalVec2<T>) -> Self::Output {
+        LogicalVec2 {
             inline: self.inline - other.inline,
             block: self.block - other.block,
         }
     }
 }
 
-impl<T> AddAssign<&'_ flow_relative::Vec2<T>> for flow_relative::Vec2<T>
+impl<T> AddAssign<&'_ LogicalVec2<T>> for LogicalVec2<T>
 where
     T: AddAssign<T> + Copy,
 {
-    fn add_assign(&mut self, other: &'_ flow_relative::Vec2<T>) {
+    fn add_assign(&mut self, other: &'_ LogicalVec2<T>) {
         self.inline += other.inline;
         self.block += other.block;
     }
 }
 
-impl flow_relative::Vec2<Length> {
+impl<T: Zero> LogicalVec2<T> {
     pub fn zero() -> Self {
         Self {
-            inline: Length::zero(),
-            block: Length::zero(),
+            inline: T::zero(),
+            block: T::zero(),
         }
     }
 }
 
-impl flow_relative::Vec2<LengthOrAuto> {
-    pub fn auto_is(&self, f: impl Fn() -> Length) -> flow_relative::Vec2<Length> {
-        flow_relative::Vec2 {
+impl LogicalVec2<LengthOrAuto> {
+    pub fn auto_is(&self, f: impl Fn() -> Length) -> LogicalVec2<Length> {
+        LogicalVec2 {
             inline: self.inline.auto_is(&f),
             block: self.block.auto_is(&f),
         }
     }
 }
 
-impl flow_relative::Vec2<LengthPercentageOrAuto<'_>> {
+impl LogicalVec2<LengthPercentageOrAuto<'_>> {
     pub fn percentages_relative_to(
         &self,
         containing_block: &ContainingBlock,
-    ) -> flow_relative::Vec2<LengthOrAuto> {
-        flow_relative::Vec2 {
+    ) -> LogicalVec2<LengthOrAuto> {
+        LogicalVec2 {
             inline: self
                 .inline
                 .percentage_relative_to(containing_block.inline_size),
@@ -139,12 +143,12 @@ impl flow_relative::Vec2<LengthPercentageOrAuto<'_>> {
     }
 }
 
-impl flow_relative::Vec2<Option<&'_ LengthPercentage>> {
+impl LogicalVec2<Option<&'_ LengthPercentage>> {
     pub fn percentages_relative_to(
         &self,
         containing_block: &ContainingBlock,
-    ) -> flow_relative::Vec2<Option<Length>> {
-        flow_relative::Vec2 {
+    ) -> LogicalVec2<Option<Length>> {
+        LogicalVec2 {
             inline: self
                 .inline
                 .map(|lp| lp.percentage_relative_to(containing_block.inline_size)),
@@ -155,16 +159,16 @@ impl flow_relative::Vec2<Option<&'_ LengthPercentage>> {
     }
 }
 
-impl flow_relative::Rect<Length> {
+impl<T: Zero> LogicalRect<T> {
     pub fn zero() -> Self {
         Self {
-            start_corner: flow_relative::Vec2::zero(),
-            size: flow_relative::Vec2::zero(),
+            start_corner: LogicalVec2::zero(),
+            size: LogicalVec2::zero(),
         }
     }
 }
 
-impl fmt::Debug for flow_relative::Rect<Length> {
+impl fmt::Debug for LogicalRect<Length> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(
             f,
@@ -177,7 +181,7 @@ impl fmt::Debug for flow_relative::Rect<Length> {
     }
 }
 
-impl<T: Clone> flow_relative::Vec2<T> {
+impl<T: Clone> LogicalVec2<T> {
     pub fn to_physical(&self, mode: WritingMode) -> PhysicalSize<T> {
         // https://drafts.csswg.org/css-writing-modes/#logical-to-physical
         let (x, y) = if mode.is_horizontal() {
@@ -189,7 +193,7 @@ impl<T: Clone> flow_relative::Vec2<T> {
     }
 }
 
-impl<T: Clone> flow_relative::Sides<T> {
+impl<T: Clone> LogicalSides<T> {
     pub fn from_physical(sides: &PhysicalSides<T>, mode: WritingMode) -> Self {
         // https://drafts.csswg.org/css-writing-modes/#logical-to-physical
         let block_flow = mode.block_flow_direction();
@@ -205,7 +209,7 @@ impl<T: Clone> flow_relative::Sides<T> {
             (_, InlineBaseDirection::LeftToRight) => (&sides.top, &sides.bottom),
             (_, InlineBaseDirection::RightToLeft) => (&sides.bottom, &sides.top),
         };
-        flow_relative::Sides {
+        LogicalSides {
             inline_start: is.clone(),
             inline_end: ie.clone(),
             block_start: bs.clone(),
@@ -214,9 +218,9 @@ impl<T: Clone> flow_relative::Sides<T> {
     }
 }
 
-impl<T> flow_relative::Sides<T> {
-    pub fn map<U>(&self, f: impl Fn(&T) -> U) -> flow_relative::Sides<U> {
-        flow_relative::Sides {
+impl<T> LogicalSides<T> {
+    pub fn map<U>(&self, f: impl Fn(&T) -> U) -> LogicalSides<U> {
+        LogicalSides {
             inline_start: f(&self.inline_start),
             inline_end: f(&self.inline_end),
             block_start: f(&self.block_start),
@@ -228,8 +232,8 @@ impl<T> flow_relative::Sides<T> {
         &self,
         inline_f: impl Fn(&T) -> U,
         block_f: impl Fn(&T) -> U,
-    ) -> flow_relative::Sides<U> {
-        flow_relative::Sides {
+    ) -> LogicalSides<U> {
+        LogicalSides {
             inline_start: inline_f(&self.inline_start),
             inline_end: inline_f(&self.inline_end),
             block_start: block_f(&self.block_start),
@@ -251,11 +255,11 @@ impl<T> flow_relative::Sides<T> {
         self.block_start + self.block_end
     }
 
-    pub fn sum(&self) -> flow_relative::Vec2<T::Output>
+    pub fn sum(&self) -> LogicalVec2<T::Output>
     where
         T: Add + Copy,
     {
-        flow_relative::Vec2 {
+        LogicalVec2 {
             inline: self.inline_sum(),
             block: self.block_sum(),
         }
@@ -300,44 +304,44 @@ impl<T> flow_relative::Sides<T> {
     }
 }
 
-impl<T> flow_relative::Sides<T>
+impl<T> LogicalSides<T>
 where
     T: Copy,
 {
-    pub fn start_offset(&self) -> flow_relative::Vec2<T> {
-        flow_relative::Vec2 {
+    pub fn start_offset(&self) -> LogicalVec2<T> {
+        LogicalVec2 {
             inline: self.inline_start,
             block: self.block_start,
         }
     }
 }
 
-impl flow_relative::Sides<&'_ LengthPercentage> {
-    pub fn percentages_relative_to(&self, basis: Length) -> flow_relative::Sides<Length> {
+impl LogicalSides<&'_ LengthPercentage> {
+    pub fn percentages_relative_to(&self, basis: Length) -> LogicalSides<Length> {
         self.map(|s| s.percentage_relative_to(basis))
     }
 }
 
-impl flow_relative::Sides<LengthPercentageOrAuto<'_>> {
-    pub fn percentages_relative_to(&self, basis: Length) -> flow_relative::Sides<LengthOrAuto> {
+impl LogicalSides<LengthPercentageOrAuto<'_>> {
+    pub fn percentages_relative_to(&self, basis: Length) -> LogicalSides<LengthOrAuto> {
         self.map(|s| s.percentage_relative_to(basis))
     }
 }
 
-impl flow_relative::Sides<LengthOrAuto> {
-    pub fn auto_is(&self, f: impl Fn() -> Length) -> flow_relative::Sides<Length> {
+impl LogicalSides<LengthOrAuto> {
+    pub fn auto_is(&self, f: impl Fn() -> Length) -> LogicalSides<Length> {
         self.map(|s| s.auto_is(&f))
     }
 }
 
-impl<T> Add<&'_ flow_relative::Sides<T>> for &'_ flow_relative::Sides<T>
+impl<T> Add<&'_ LogicalSides<T>> for &'_ LogicalSides<T>
 where
     T: Add<Output = T> + Copy,
 {
-    type Output = flow_relative::Sides<T>;
+    type Output = LogicalSides<T>;
 
-    fn add(self, other: &'_ flow_relative::Sides<T>) -> Self::Output {
-        flow_relative::Sides {
+    fn add(self, other: &'_ LogicalSides<T>) -> Self::Output {
+        LogicalSides {
             inline_start: self.inline_start + other.inline_start,
             inline_end: self.inline_end + other.inline_end,
             block_start: self.block_start + other.block_start,
@@ -346,7 +350,18 @@ where
     }
 }
 
-impl<T> flow_relative::Rect<T> {
+impl<T: Zero> LogicalSides<T> {
+    pub(crate) fn zero() -> LogicalSides<T> {
+        LogicalSides {
+            inline_start: T::zero(),
+            inline_end: T::zero(),
+            block_start: T::zero(),
+            block_end: T::zero(),
+        }
+    }
+}
+
+impl<T> LogicalRect<T> {
     pub fn max_inline_position(&self) -> T
     where
         T: Add<Output = T> + Copy,
@@ -361,17 +376,17 @@ impl<T> flow_relative::Rect<T> {
         self.start_corner.block + self.size.block
     }
 
-    pub fn inflate(&self, sides: &flow_relative::Sides<T>) -> Self
+    pub fn inflate(&self, sides: &LogicalSides<T>) -> Self
     where
         T: Add<Output = T> + Copy,
         T: Sub<Output = T> + Copy,
     {
-        flow_relative::Rect {
-            start_corner: flow_relative::Vec2 {
+        LogicalRect {
+            start_corner: LogicalVec2 {
                 inline: self.start_corner.inline - sides.inline_start,
                 block: self.start_corner.block - sides.block_start,
             },
-            size: flow_relative::Vec2 {
+            size: LogicalVec2 {
                 inline: self.size.inline + sides.inline_sum(),
                 block: self.size.block + sides.block_sum(),
             },

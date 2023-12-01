@@ -4,6 +4,9 @@
 
 //! Abstract windowing methods. The concrete implementations of these can be found in `platform/`.
 
+use std::fmt::{Debug, Error, Formatter};
+use std::time::Duration;
+
 use embedder_traits::{EmbedderProxy, EventLoopWaker};
 use euclid::Scale;
 use keyboard_types::KeyboardEvent;
@@ -12,10 +15,7 @@ use script_traits::{MediaSessionActionType, MouseButton, TouchEventType, TouchId
 use servo_geometry::DeviceIndependentPixel;
 use servo_media::player::context::{GlApi, GlContext, NativeDisplay};
 use servo_url::ServoUrl;
-use std::fmt::{Debug, Error, Formatter};
-use std::time::Duration;
 use style_traits::DevicePixel;
-
 use webrender_api::units::{DeviceIntPoint, DeviceIntRect, DeviceIntSize, DevicePoint};
 use webrender_api::ScrollLocation;
 use webrender_surfman::WebrenderSurfman;
@@ -35,9 +35,9 @@ pub enum WebRenderDebugOption {
     RenderTargetDebug,
 }
 
-/// Events that the windowing system sends to Servo.
+/// Events that the embedder sends to Servo, including events from the windowing system.
 #[derive(Clone)]
-pub enum WindowEvent {
+pub enum EmbedderEvent {
     /// Sent when no message has arrived, but the event loop was kicked for some reason (perhaps
     /// by another Servo subsystem).
     ///
@@ -107,38 +107,38 @@ pub enum WindowEvent {
     IMEDismissed,
 }
 
-impl Debug for WindowEvent {
+impl Debug for EmbedderEvent {
     fn fmt(&self, f: &mut Formatter) -> Result<(), Error> {
         match *self {
-            WindowEvent::Idle => write!(f, "Idle"),
-            WindowEvent::Refresh => write!(f, "Refresh"),
-            WindowEvent::Resize => write!(f, "Resize"),
-            WindowEvent::Keyboard(..) => write!(f, "Keyboard"),
-            WindowEvent::AllowNavigationResponse(..) => write!(f, "AllowNavigationResponse"),
-            WindowEvent::LoadUrl(..) => write!(f, "LoadUrl"),
-            WindowEvent::MouseWindowEventClass(..) => write!(f, "Mouse"),
-            WindowEvent::MouseWindowMoveEventClass(..) => write!(f, "MouseMove"),
-            WindowEvent::Touch(..) => write!(f, "Touch"),
-            WindowEvent::Wheel(..) => write!(f, "Wheel"),
-            WindowEvent::Scroll(..) => write!(f, "Scroll"),
-            WindowEvent::Zoom(..) => write!(f, "Zoom"),
-            WindowEvent::PinchZoom(..) => write!(f, "PinchZoom"),
-            WindowEvent::ResetZoom => write!(f, "ResetZoom"),
-            WindowEvent::Navigation(..) => write!(f, "Navigation"),
-            WindowEvent::Quit => write!(f, "Quit"),
-            WindowEvent::Reload(..) => write!(f, "Reload"),
-            WindowEvent::NewBrowser(..) => write!(f, "NewBrowser"),
-            WindowEvent::SendError(..) => write!(f, "SendError"),
-            WindowEvent::CloseBrowser(..) => write!(f, "CloseBrowser"),
-            WindowEvent::SelectBrowser(..) => write!(f, "SelectBrowser"),
-            WindowEvent::ToggleWebRenderDebug(..) => write!(f, "ToggleWebRenderDebug"),
-            WindowEvent::CaptureWebRender => write!(f, "CaptureWebRender"),
-            WindowEvent::ToggleSamplingProfiler(..) => write!(f, "ToggleSamplingProfiler"),
-            WindowEvent::ExitFullScreen(..) => write!(f, "ExitFullScreen"),
-            WindowEvent::MediaSessionAction(..) => write!(f, "MediaSessionAction"),
-            WindowEvent::ChangeBrowserVisibility(..) => write!(f, "ChangeBrowserVisibility"),
-            WindowEvent::IMEDismissed => write!(f, "IMEDismissed"),
-            WindowEvent::ClearCache => write!(f, "ClearCache"),
+            EmbedderEvent::Idle => write!(f, "Idle"),
+            EmbedderEvent::Refresh => write!(f, "Refresh"),
+            EmbedderEvent::Resize => write!(f, "Resize"),
+            EmbedderEvent::Keyboard(..) => write!(f, "Keyboard"),
+            EmbedderEvent::AllowNavigationResponse(..) => write!(f, "AllowNavigationResponse"),
+            EmbedderEvent::LoadUrl(..) => write!(f, "LoadUrl"),
+            EmbedderEvent::MouseWindowEventClass(..) => write!(f, "Mouse"),
+            EmbedderEvent::MouseWindowMoveEventClass(..) => write!(f, "MouseMove"),
+            EmbedderEvent::Touch(..) => write!(f, "Touch"),
+            EmbedderEvent::Wheel(..) => write!(f, "Wheel"),
+            EmbedderEvent::Scroll(..) => write!(f, "Scroll"),
+            EmbedderEvent::Zoom(..) => write!(f, "Zoom"),
+            EmbedderEvent::PinchZoom(..) => write!(f, "PinchZoom"),
+            EmbedderEvent::ResetZoom => write!(f, "ResetZoom"),
+            EmbedderEvent::Navigation(..) => write!(f, "Navigation"),
+            EmbedderEvent::Quit => write!(f, "Quit"),
+            EmbedderEvent::Reload(..) => write!(f, "Reload"),
+            EmbedderEvent::NewBrowser(..) => write!(f, "NewBrowser"),
+            EmbedderEvent::SendError(..) => write!(f, "SendError"),
+            EmbedderEvent::CloseBrowser(..) => write!(f, "CloseBrowser"),
+            EmbedderEvent::SelectBrowser(..) => write!(f, "SelectBrowser"),
+            EmbedderEvent::ToggleWebRenderDebug(..) => write!(f, "ToggleWebRenderDebug"),
+            EmbedderEvent::CaptureWebRender => write!(f, "CaptureWebRender"),
+            EmbedderEvent::ToggleSamplingProfiler(..) => write!(f, "ToggleSamplingProfiler"),
+            EmbedderEvent::ExitFullScreen(..) => write!(f, "ExitFullScreen"),
+            EmbedderEvent::MediaSessionAction(..) => write!(f, "MediaSessionAction"),
+            EmbedderEvent::ChangeBrowserVisibility(..) => write!(f, "ChangeBrowserVisibility"),
+            EmbedderEvent::IMEDismissed => write!(f, "IMEDismissed"),
+            EmbedderEvent::ClearCache => write!(f, "ClearCache"),
         }
     }
 }
@@ -200,6 +200,13 @@ pub struct EmbedderCoordinates {
 }
 
 impl EmbedderCoordinates {
+    /// Get the unflipped viewport rectangle for use with the WebRender API.
+    pub fn get_viewport(&self) -> DeviceIntRect {
+        DeviceIntRect::from_untyped(&self.viewport.to_untyped())
+    }
+
+    /// Get the flipped viewport rectangle. This should be used when drawing directly
+    /// to the framebuffer with OpenGL commands.
     pub fn get_flipped_viewport(&self) -> DeviceIntRect {
         let fb_height = self.framebuffer.height;
         let mut view = self.viewport.clone();

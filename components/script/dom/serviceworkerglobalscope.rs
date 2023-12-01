@@ -2,6 +2,28 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
+use std::sync::atomic::AtomicBool;
+use std::sync::Arc;
+use std::thread::{self, JoinHandle};
+use std::time::{Duration, Instant};
+
+use crossbeam_channel::{after, unbounded, Receiver, Sender};
+use devtools_traits::DevtoolScriptControlMsg;
+use dom_struct::dom_struct;
+use ipc_channel::ipc::{IpcReceiver, IpcSender};
+use ipc_channel::router::ROUTER;
+use js::jsapi::{JSContext, JS_AddInterruptCallback};
+use js::jsval::UndefinedValue;
+use msg::constellation_msg::PipelineId;
+use net_traits::request::{CredentialsMode, Destination, ParserMetadata, Referrer, RequestBuilder};
+use net_traits::{CustomResponseMediator, IpcSend};
+use parking_lot::Mutex;
+use script_traits::{ScopeThings, ServiceWorkerMsg, WorkerGlobalScopeInit, WorkerScriptLoadOrigin};
+use servo_config::pref;
+use servo_rand::random;
+use servo_url::ServoUrl;
+use style::thread_state::{self, ThreadState};
+
 use crate::devtools;
 use crate::dom::abstractworker::WorkerScriptMsg;
 use crate::dom::abstractworkerglobalscope::{run_worker_event_loop, WorkerEventLoopMethods};
@@ -29,26 +51,6 @@ use crate::script_runtime::{
 };
 use crate::task_queue::{QueuedTask, QueuedTaskConversion, TaskQueue};
 use crate::task_source::TaskSourceName;
-use crossbeam_channel::{after, unbounded, Receiver, Sender};
-use devtools_traits::DevtoolScriptControlMsg;
-use dom_struct::dom_struct;
-use ipc_channel::ipc::{IpcReceiver, IpcSender};
-use ipc_channel::router::ROUTER;
-use js::jsapi::{JSContext, JS_AddInterruptCallback};
-use js::jsval::UndefinedValue;
-use msg::constellation_msg::PipelineId;
-use net_traits::request::{CredentialsMode, Destination, ParserMetadata, Referrer, RequestBuilder};
-use net_traits::{CustomResponseMediator, IpcSend};
-use parking_lot::Mutex;
-use script_traits::{ScopeThings, ServiceWorkerMsg, WorkerGlobalScopeInit, WorkerScriptLoadOrigin};
-use servo_config::pref;
-use servo_rand::random;
-use servo_url::ServoUrl;
-use std::sync::atomic::AtomicBool;
-use std::sync::Arc;
-use std::thread::{self, JoinHandle};
-use std::time::{Duration, Instant};
-use style::thread_state::{self, ThreadState};
 
 /// Messages used to control service worker event loop
 pub enum ServiceWorkerScriptMsg {
@@ -131,6 +133,7 @@ pub enum MixedMessage {
 
 #[derive(Clone, JSTraceable)]
 pub struct ServiceWorkerChan {
+    #[no_trace]
     pub sender: Sender<ServiceWorkerScriptMsg>,
 }
 
@@ -150,16 +153,16 @@ impl ScriptChan for ServiceWorkerChan {
     }
 }
 
-unsafe_no_jsmanaged_fields!(TaskQueue<ServiceWorkerScriptMsg>);
-
 #[dom_struct]
 pub struct ServiceWorkerGlobalScope {
     workerglobalscope: WorkerGlobalScope,
 
     #[ignore_malloc_size_of = "Defined in std"]
+    #[no_trace]
     task_queue: TaskQueue<ServiceWorkerScriptMsg>,
 
     #[ignore_malloc_size_of = "Defined in std"]
+    #[no_trace]
     own_sender: Sender<ServiceWorkerScriptMsg>,
 
     /// A port on which a single "time-out" message can be received,
@@ -167,16 +170,20 @@ pub struct ServiceWorkerGlobalScope {
     /// while still draining the task-queue
     // and running all enqueued, and not cancelled, tasks.
     #[ignore_malloc_size_of = "Defined in std"]
+    #[no_trace]
     time_out_port: Receiver<Instant>,
 
     #[ignore_malloc_size_of = "Defined in std"]
+    #[no_trace]
     swmanager_sender: IpcSender<ServiceWorkerMsg>,
 
+    #[no_trace]
     scope_url: ServoUrl,
 
     /// A receiver of control messages,
     /// currently only used to signal shutdown.
     #[ignore_malloc_size_of = "Channels are hard"]
+    #[no_trace]
     control_receiver: Receiver<ServiceWorkerControlMsg>,
 }
 
@@ -306,7 +313,8 @@ impl ServiceWorkerGlobalScope {
             .spawn(move || {
                 thread_state::initialize(ThreadState::SCRIPT | ThreadState::IN_WORKER);
                 let runtime = new_rt_and_cx(None);
-                let _ = context_sender.send(ContextForRequestInterrupt::new(runtime.cx()));
+                let context_for_interrupt = ContextForRequestInterrupt::new(runtime.cx());
+                let _ = context_sender.send(context_for_interrupt.clone());
 
                 let roots = RootCollection::new();
                 let _stack_roots = ThreadLocalStackRoots::new(&roots);
@@ -367,6 +375,7 @@ impl ServiceWorkerGlobalScope {
                     };
 
                 let scope = global.upcast::<WorkerGlobalScope>();
+                let _ac = enter_realm(&*scope);
 
                 unsafe {
                     // Handle interrupt requests
@@ -396,7 +405,8 @@ impl ServiceWorkerGlobalScope {
                         scope.script_chan(),
                         CommonScriptMsg::CollectReports,
                     );
-                scope.clear_js_runtime();
+
+                scope.clear_js_runtime(context_for_interrupt);
             })
             .expect("Thread spawning failed")
     }

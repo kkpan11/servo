@@ -3,11 +3,7 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
 #![deny(unsafe_code)]
-
-#[macro_use]
-extern crate log;
-#[macro_use]
-extern crate serde;
+#![feature(once_cell)]
 
 mod cell;
 pub mod context;
@@ -31,10 +27,10 @@ pub mod traversal;
 
 pub use flow::BoxTree;
 pub use fragment_tree::FragmentTree;
-
-use crate::geom::flow_relative::Vec2;
 use style::properties::ComputedValues;
 use style::values::computed::{Length, LengthOrAuto};
+
+use crate::geom::LogicalVec2;
 
 pub struct ContainingBlock<'a> {
     inline_size: Length,
@@ -43,7 +39,7 @@ pub struct ContainingBlock<'a> {
 }
 
 struct DefiniteContainingBlock<'a> {
-    size: Vec2<Length>,
+    size: LogicalVec2<Length>,
     style: &'a ComputedValues,
 }
 

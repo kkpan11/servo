@@ -2,6 +2,9 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
+use crossbeam_channel::{select, Receiver, Sender};
+use devtools_traits::DevtoolScriptControlMsg;
+
 use crate::dom::abstractworker::WorkerScriptMsg;
 use crate::dom::bindings::conversions::DerivedFrom;
 use crate::dom::bindings::reflector::DomObject;
@@ -12,14 +15,13 @@ use crate::dom::workerglobalscope::WorkerGlobalScope;
 use crate::realms::enter_realm;
 use crate::script_runtime::{CommonScriptMsg, ScriptChan, ScriptPort};
 use crate::task_queue::{QueuedTaskConversion, TaskQueue};
-use crossbeam_channel::{Receiver, Sender};
-use devtools_traits::DevtoolScriptControlMsg;
 
 /// A ScriptChan that can be cloned freely and will silently send a TrustedWorkerAddress with
 /// common event loop messages. While this SendableWorkerScriptChan is alive, the associated
 /// Worker object will remain alive.
 #[derive(Clone, JSTraceable)]
 pub struct SendableWorkerScriptChan {
+    #[no_trace]
     pub sender: Sender<DedicatedWorkerScriptMsg>,
     pub worker: TrustedWorkerAddress,
 }
@@ -46,6 +48,7 @@ impl ScriptChan for SendableWorkerScriptChan {
 /// Worker object will remain alive.
 #[derive(Clone, JSTraceable)]
 pub struct WorkerThreadWorkerChan {
+    #[no_trace]
     pub sender: Sender<DedicatedWorkerScriptMsg>,
     pub worker: TrustedWorkerAddress,
 }

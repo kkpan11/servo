@@ -5,11 +5,11 @@
 use darling::{FromDeriveInput, FromField, FromVariant};
 use proc_macro2::{Span, TokenStream};
 use quote::{quote, TokenStreamExt};
-use syn::{self, parse_quote, AngleBracketedGenericArguments, Binding, DeriveInput, Field};
-use syn::{GenericArgument, GenericParam, Ident, Path};
-use syn::{PathArguments, PathSegment, QSelf, Type, TypeArray, TypeGroup};
-use syn::{TypeParam, TypeParen, TypePath, TypeSlice, TypeTuple};
-use syn::{Variant, WherePredicate};
+use syn::{
+    self, parse_quote, AngleBracketedGenericArguments, AssocType, DeriveInput, Field,
+    GenericArgument, GenericParam, Ident, Path, PathArguments, PathSegment, QSelf, Type, TypeArray,
+    TypeGroup, TypeParam, TypeParen, TypePath, TypeSlice, TypeTuple, Variant, WherePredicate,
+};
 use synstructure::{self, BindStyle, BindingInfo, VariantAst, VariantInfo};
 
 /// Given an input type which has some where clauses already, like:
@@ -143,7 +143,10 @@ pub fn fmap_trait_output(input: &DeriveInput, trait_path: &Path, trait_output: &
                         let ident = &data.ident;
                         GenericArgument::Type(parse_quote!(<#ident as #trait_path>::#trait_output))
                     },
-                    ref arg => panic!("arguments {:?} cannot be mapped yet", arg),
+                    &GenericParam::Const(ref inner) => {
+                        let ident = &inner.ident;
+                        GenericArgument::Const(parse_quote!(#ident))
+                    },
                 })
                 .collect(),
             colon2_token: Default::default(),
@@ -249,8 +252,8 @@ where
                                     &GenericArgument::Type(ref data) => GenericArgument::Type(
                                         map_type_params(data, params, self_type, f),
                                     ),
-                                    &GenericArgument::Binding(ref data) => {
-                                        GenericArgument::Binding(Binding {
+                                    &GenericArgument::AssocType(ref data) => {
+                                        GenericArgument::AssocType(AssocType {
                                             ty: map_type_params(&data.ty, params, self_type, f),
                                             ..data.clone()
                                         })
@@ -365,12 +368,17 @@ pub fn to_css_identifier(mut camel_case: &str) -> String {
             }
         }
         if !first {
-            result.push_str("-");
+            result.push('-');
         }
         first = false;
         result.push_str(&segment.to_lowercase());
     }
     result
+}
+
+/// Transforms foo-bar to FOO_BAR.
+pub fn to_scream_case(css_case: &str) -> String {
+    css_case.to_uppercase().replace('-', "_")
 }
 
 /// Given "FooBar", returns "Foo" and sets `camel_case` to "Bar".

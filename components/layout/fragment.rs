@@ -4,29 +4,22 @@
 
 //! The `Fragment` type, which represents the leaves of the layout tree.
 
-use crate::context::{with_thread_local_font_context, LayoutContext};
-use crate::display_list::items::{ClipScrollNodeIndex, OpaqueNode, BLUR_INFLATION_FACTOR};
-use crate::display_list::ToLayout;
-use crate::floats::ClearType;
-use crate::flow::{GetBaseFlow, ImmutableFlowUtils};
-use crate::flow_ref::FlowRef;
-use crate::inline::{InlineFragmentContext, InlineFragmentNodeFlags, InlineFragmentNodeInfo};
-use crate::inline::{InlineMetrics, LineMetrics};
-#[cfg(debug_assertions)]
-use crate::layout_debug;
-use crate::model::style_length;
-use crate::model::{self, IntrinsicISizes, IntrinsicISizesContribution, MaybeAuto, SizeConstraint};
-use crate::text;
-use crate::text::TextRunScanner;
-use crate::wrapper::ThreadSafeLayoutNodeHelpers;
-use crate::ServoArc;
+use std::borrow::ToOwned;
+use std::cmp::{max, min, Ordering};
+use std::collections::LinkedList;
+use std::sync::{Arc, Mutex};
+use std::{f32, fmt};
+
 use app_units::Au;
+use bitflags::bitflags;
 use canvas_traits::canvas::{CanvasId, CanvasMsg};
 use euclid::default::{Point2D, Rect, Size2D, Vector2D};
 use gfx::text::glyph::ByteIndex;
 use gfx::text::text_run::{TextRun, TextRunSlice};
 use gfx_traits::StackingContextId;
+use html5ever::{local_name, namespace_url, ns};
 use ipc_channel::ipc::IpcSender;
+use log::debug;
 use msg::constellation_msg::{BrowsingContextId, PipelineId};
 use net_traits::image::base::{Image, ImageMetadata};
 use net_traits::image_cache::{ImageOrMetadataAvailable, UsePlaceholder};
@@ -37,11 +30,7 @@ use script_layout_interface::wrapper_traits::{
 use script_layout_interface::{HTMLCanvasData, HTMLCanvasDataSource, HTMLMediaData, SVGSVGData};
 use serde::ser::{Serialize, SerializeStruct, Serializer};
 use servo_url::ServoUrl;
-use std::borrow::ToOwned;
-use std::cmp::{max, min, Ordering};
-use std::collections::LinkedList;
-use std::sync::{Arc, Mutex};
-use std::{f32, fmt};
+use size_of_test::size_of_test;
 use style::computed_values::border_collapse::T as BorderCollapse;
 use style::computed_values::box_sizing::T as BoxSizing;
 use style::computed_values::clear::T as Clear;
@@ -66,6 +55,25 @@ use style::values::generics::box_::{Perspective, VerticalAlignKeyword};
 use style::values::generics::transform;
 use webrender_api::units::LayoutTransform;
 use webrender_api::{self, ImageKey};
+
+use crate::context::{with_thread_local_font_context, LayoutContext};
+use crate::display_list::items::{ClipScrollNodeIndex, OpaqueNode, BLUR_INFLATION_FACTOR};
+use crate::display_list::ToLayout;
+use crate::floats::ClearType;
+use crate::flow::{GetBaseFlow, ImmutableFlowUtils};
+use crate::flow_ref::FlowRef;
+use crate::inline::{
+    InlineFragmentContext, InlineFragmentNodeFlags, InlineFragmentNodeInfo, InlineMetrics,
+    LineMetrics,
+};
+#[cfg(debug_assertions)]
+use crate::layout_debug;
+use crate::model::{
+    self, style_length, IntrinsicISizes, IntrinsicISizesContribution, MaybeAuto, SizeConstraint,
+};
+use crate::text::TextRunScanner;
+use crate::wrapper::ThreadSafeLayoutNodeHelpers;
+use crate::{text, ServoArc};
 
 // From gfxFontConstants.h in Firefox.
 static FONT_SUBSCRIPT_OFFSET_RATIO: f32 = 0.20;
@@ -158,6 +166,11 @@ pub struct Fragment {
     pub established_reference_frame: Option<ClipScrollNodeIndex>,
 }
 
+#[cfg(debug_assertions)]
+size_of_test!(Fragment, 176);
+#[cfg(not(debug_assertions))]
+size_of_test!(Fragment, 152);
+
 impl Serialize for Fragment {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         let mut serializer = serializer.serialize_struct("fragment", 3)?;
@@ -211,6 +224,8 @@ pub enum SpecificFragmentInfo {
     /// Other fragments can only be totally truncated or not truncated at all.
     TruncatedFragment(Box<TruncatedFragmentInfo>),
 }
+
+size_of_test!(SpecificFragmentInfo, 24);
 
 impl SpecificFragmentInfo {
     fn restyle_damage(&self) -> RestyleDamage {
@@ -527,6 +542,7 @@ pub struct ScannedTextFragmentInfo {
 }
 
 bitflags! {
+    #[derive(Clone, Copy)]
     pub struct ScannedTextFlags: u8 {
         /// Whether a line break is required after this fragment if wrapping on newlines (e.g. if
         /// `white-space: pre` is in effect).
@@ -1501,7 +1517,9 @@ impl Fragment {
         if let Some(ref inline_fragment_context) = self.inline_context {
             for node in &inline_fragment_context.nodes {
                 if node.style.get_box().position == Position::Relative {
-                    rel_pos = rel_pos + from_style(&*node.style, containing_block_size);
+                    // TODO(servo#30577) revert once underlying bug is fixed
+                    // rel_pos = rel_pos + from_style(&*node.style, containing_block_size);
+                    rel_pos = rel_pos.add_or_warn(from_style(&*node.style, containing_block_size));
                 }
             }
         }
@@ -2742,9 +2760,11 @@ impl Fragment {
     }
 
     /// Returns true if this fragment has a transform applied that causes it to take up no space.
-    pub fn has_non_invertible_transform(&self) -> bool {
+    pub fn has_non_invertible_transform_or_zero_scale(&self) -> bool {
         self.transform_matrix(&Rect::default())
-            .map_or(false, |matrix| !matrix.is_invertible())
+            .map_or(false, |matrix| {
+                !matrix.is_invertible() || matrix.m11 == 0. || matrix.m22 == 0.
+            })
     }
 
     /// Returns true if this fragment establishes a new stacking context and false otherwise.
@@ -3321,10 +3341,10 @@ bitflags! {
     // Various flags we can use when splitting fragments. See
     // `calculate_split_position_using_breaking_strategy()`.
     struct SplitOptions: u8 {
-        #[doc = "True if this is the first fragment on the line."]
+        /// True if this is the first fragment on the line."]
         const STARTS_LINE = 0x01;
-        #[doc = "True if we should attempt to split at character boundaries if this split fails. \
-                 This is used to implement `overflow-wrap: break-word`."]
+        /// True if we should attempt to split at character boundaries if this split fails. \
+        /// This is used to implement `overflow-wrap: break-word`."]
         const RETRY_AT_CHARACTER_BOUNDARIES = 0x02;
     }
 }
@@ -3439,6 +3459,7 @@ impl Overflow {
 }
 
 bitflags! {
+    #[derive(Clone, Debug)]
     pub struct FragmentFlags: u8 {
         // TODO(stshine): find a better name since these flags can also be used for grid item.
         /// Whether this fragment represents a child in a row flex container.

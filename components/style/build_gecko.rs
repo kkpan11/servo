@@ -121,12 +121,9 @@ trait BuilderExt {
 
 impl BuilderExt for Builder {
     fn get_initial_builder() -> Builder {
-        use bindgen::RustTarget;
-
         // Disable rust unions, because we replace some types inside of
         // them.
         let mut builder = Builder::default()
-            .rust_target(RustTarget::Stable_1_25)
             .size_t_is_usize(true)
             .disable_untagged_union();
 
@@ -285,11 +282,11 @@ fn generate_structs() {
     let mut fixups = vec![];
     let builder = BuilderWithConfig::new(builder, CONFIG["structs"].as_table().unwrap())
         .handle_common(&mut fixups)
-        .handle_str_items("whitelist-functions", |b, item| b.allowlist_function(item))
+        .handle_str_items("allowlist-functions", |b, item| b.allowlist_function(item))
         .handle_str_items("bitfield-enums", |b, item| b.bitfield_enum(item))
         .handle_str_items("rusty-enums", |b, item| b.rustified_enum(item))
-        .handle_str_items("whitelist-vars", |b, item| b.allowlist_var(item))
-        .handle_str_items("whitelist-types", |b, item| b.allowlist_type(item))
+        .handle_str_items("allowlist-vars", |b, item| b.allowlist_var(item))
+        .handle_str_items("allowlist-types", |b, item| b.allowlist_type(item))
         .handle_str_items("opaque-types", |b, item| b.opaque_type(item))
         .handle_table_items("cbindgen-types", |b, item| {
             let gecko = item["gecko"].as_str().unwrap();

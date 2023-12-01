@@ -26,7 +26,7 @@ libc = { workspace = true }
 winapi = { workspace = true, features = ["wingdi", "winuser", "winnt", "winbase", "processenv", "namedpipeapi", "ntdef", "minwindef", "handleapi", "debugapi"] }
 
 [build-dependencies]
-cbindgen = "0.20"
+cbindgen = "0.26"
 
 [features]
 debugmozjs = ["simpleservo/debugmozjs"]
@@ -35,7 +35,6 @@ googlevr = ["simpleservo/googlevr"]
 jitspew = ["simpleservo/jitspew"]
 js_backtrace = ["simpleservo/js_backtrace"]
 max_log_level = ["simpleservo/max_log_level"]
-media-dummy = ["simpleservo/media-dummy"]
 media-gstreamer = ["simpleservo/media-gstreamer"]
 native-bluetooth = ["simpleservo/native-bluetooth"]
 no-wgl = ["simpleservo/no-wgl"]

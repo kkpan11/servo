@@ -2,6 +2,39 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
+use std::borrow::Cow;
+use std::cell::Cell;
+use std::ops::Range;
+use std::ptr::NonNull;
+use std::{f64, ptr};
+
+use chrono::naive::{NaiveDate, NaiveDateTime};
+use chrono::{Datelike, Weekday};
+use dom_struct::dom_struct;
+use embedder_traits::FilterPattern;
+use encoding_rs::Encoding;
+use html5ever::{local_name, namespace_url, ns, LocalName, Prefix};
+use js::jsapi::{
+    ClippedTime, DateGetMsecSinceEpoch, Handle, JSObject, JS_ClearPendingException, NewDateObject,
+    NewUCRegExpObject, ObjectIsDate, RegExpFlag_Unicode, RegExpFlags,
+};
+use js::jsval::UndefinedValue;
+use js::rust::jsapi_wrapped::{ExecuteRegExpNoStatics, ObjectIsRegExp};
+use js::rust::{HandleObject, MutableHandleObject};
+use msg::constellation_msg::InputMethodType;
+use net_traits::blob_url_store::get_blob_origin;
+use net_traits::filemanager_thread::FileManagerThreadMsg;
+use net_traits::{CoreResourceMsg, IpcSend};
+use profile_traits::ipc;
+use script_layout_interface::rpc::TextIndexResponse;
+use script_traits::ScriptToConstellationChan;
+use servo_atoms::Atom;
+use style::attr::AttrValue;
+use style::str::{split_commas, str_join};
+use style_traits::dom::ElementState;
+use unicode_bidi::{bidi_class, BidiClass};
+use url::Url;
+
 use crate::dom::activation::Activatable;
 use crate::dom::attr::Attr;
 use crate::dom::bindings::cell::DomRefCell;
@@ -28,14 +61,14 @@ use crate::dom::htmldatalistelement::HTMLDataListElement;
 use crate::dom::htmlelement::HTMLElement;
 use crate::dom::htmlfieldsetelement::HTMLFieldSetElement;
 use crate::dom::htmlformelement::{
-    FormControl, FormDatum, FormDatumValue, FormSubmitter, HTMLFormElement,
+    FormControl, FormDatum, FormDatumValue, FormSubmitter, HTMLFormElement, ResetFrom,
+    SubmittedFrom,
 };
-use crate::dom::htmlformelement::{ResetFrom, SubmittedFrom};
 use crate::dom::keyboardevent::KeyboardEvent;
 use crate::dom::mouseevent::MouseEvent;
-use crate::dom::node::{document_from_node, window_from_node};
 use crate::dom::node::{
-    BindContext, CloneChildrenFlag, Node, NodeDamage, ShadowIncluding, UnbindContext,
+    document_from_node, window_from_node, BindContext, CloneChildrenFlag, Node, NodeDamage,
+    ShadowIncluding, UnbindContext,
 };
 use crate::dom::nodelist::NodeList;
 use crate::dom::textcontrol::{TextControlElement, TextControlSelection};
@@ -49,38 +82,6 @@ use crate::textinput::KeyReaction::{
 };
 use crate::textinput::Lines::Single;
 use crate::textinput::{Direction, SelectionDirection, TextInput, UTF16CodeUnits, UTF8Bytes};
-use chrono::naive::{NaiveDate, NaiveDateTime};
-use chrono::{Datelike, Weekday};
-use dom_struct::dom_struct;
-use embedder_traits::FilterPattern;
-use encoding_rs::Encoding;
-use html5ever::{LocalName, Prefix};
-use js::jsapi::{
-    ClippedTime, DateGetMsecSinceEpoch, Handle, JSObject, JS_ClearPendingException, NewDateObject,
-    NewUCRegExpObject, ObjectIsDate, RegExpFlag_Unicode, RegExpFlags,
-};
-use js::jsval::UndefinedValue;
-use js::rust::jsapi_wrapped::{ExecuteRegExpNoStatics, ObjectIsRegExp};
-use js::rust::{HandleObject, MutableHandleObject};
-use msg::constellation_msg::InputMethodType;
-use net_traits::blob_url_store::get_blob_origin;
-use net_traits::filemanager_thread::FileManagerThreadMsg;
-use net_traits::{CoreResourceMsg, IpcSend};
-use profile_traits::ipc;
-use script_layout_interface::rpc::TextIndexResponse;
-use script_traits::ScriptToConstellationChan;
-use servo_atoms::Atom;
-use std::borrow::Cow;
-use std::cell::Cell;
-use std::f64;
-use std::ops::Range;
-use std::ptr;
-use std::ptr::NonNull;
-use style::attr::AttrValue;
-use style::element_state::ElementState;
-use style::str::{split_commas, str_join};
-use unicode_bidi::{bidi_class, BidiClass};
-use url::Url;
 
 const DEFAULT_SUBMIT_VALUE: &'static str = "Submit";
 const DEFAULT_RESET_VALUE: &'static str = "Reset";
@@ -255,6 +256,7 @@ pub struct HTMLInputElement {
     maxlength: Cell<i32>,
     minlength: Cell<i32>,
     #[ignore_malloc_size_of = "#7193"]
+    #[no_trace]
     textinput: DomRefCell<TextInput<ScriptToConstellationChan>>,
     // https://html.spec.whatwg.org/multipage/#concept-input-value-dirty-flag
     value_dirty: Cell<bool>,
@@ -297,7 +299,7 @@ impl HTMLInputElement {
             .clone();
         HTMLInputElement {
             htmlelement: HTMLElement::new_inherited_with_state(
-                ElementState::IN_ENABLED_STATE | ElementState::IN_READWRITE_STATE,
+                ElementState::ENABLED | ElementState::READWRITE,
                 local_name,
                 prefix,
                 document,
@@ -325,7 +327,7 @@ impl HTMLInputElement {
         }
     }
 
-    #[allow(unrooted_must_root)]
+    #[allow(crown::unrooted_must_root)]
     pub fn new(
         local_name: LocalName,
         prefix: Option<Prefix>,
@@ -1087,13 +1089,13 @@ impl<'dom> LayoutHTMLInputElementHelpers<'dom> for LayoutDom<'dom, HTMLInputElem
     fn checked_state_for_layout(self) -> bool {
         self.upcast::<Element>()
             .get_state_for_layout()
-            .contains(ElementState::IN_CHECKED_STATE)
+            .contains(ElementState::CHECKED)
     }
 
     fn indeterminate_state_for_layout(self) -> bool {
         self.upcast::<Element>()
             .get_state_for_layout()
-            .contains(ElementState::IN_INDETERMINATE_STATE)
+            .contains(ElementState::INDETERMINATE)
     }
 }
 
@@ -1199,7 +1201,7 @@ impl HTMLInputElementMethods for HTMLInputElement {
     fn Checked(&self) -> bool {
         self.upcast::<Element>()
             .state()
-            .contains(ElementState::IN_CHECKED_STATE)
+            .contains(ElementState::CHECKED)
     }
 
     // https://html.spec.whatwg.org/multipage/#dom-input-checked
@@ -1296,6 +1298,8 @@ impl HTMLInputElementMethods for HTMLInputElement {
             },
         }
 
+        self.validity_state()
+            .perform_validation_and_update(ValidationFlags::all());
         self.upcast::<Node>().dirty(NodeDamage::OtherNodeDamage);
         Ok(())
     }
@@ -1495,13 +1499,13 @@ impl HTMLInputElementMethods for HTMLInputElement {
     fn Indeterminate(&self) -> bool {
         self.upcast::<Element>()
             .state()
-            .contains(ElementState::IN_INDETERMINATE_STATE)
+            .contains(ElementState::INDETERMINATE)
     }
 
     // https://html.spec.whatwg.org/multipage/#dom-input-indeterminate
     fn SetIndeterminate(&self, val: bool) {
         self.upcast::<Element>()
-            .set_state(ElementState::IN_INDETERMINATE_STATE, val)
+            .set_state(ElementState::INDETERMINATE, val)
     }
 
     // https://html.spec.whatwg.org/multipage/#dom-lfe-labels
@@ -1799,7 +1803,7 @@ impl HTMLInputElement {
 
     fn update_checked_state(&self, checked: bool, dirty: bool) {
         self.upcast::<Element>()
-            .set_state(ElementState::IN_CHECKED_STATE, checked);
+            .set_state(ElementState::CHECKED, checked);
 
         if dirty {
             self.checked_changed.set(true);
@@ -2062,7 +2066,7 @@ impl HTMLInputElement {
         }
     }
 
-    #[allow(unrooted_must_root)]
+    #[allow(crown::unrooted_must_root)]
     fn selection(&self) -> TextControlSelection<Self> {
         TextControlSelection::new(&self, &self.textinput)
     }
@@ -2136,14 +2140,13 @@ impl HTMLInputElement {
     // https://html.spec.whatwg.org/multipage/#concept-input-value-string-number
     fn convert_string_to_number(&self, value: &DOMString) -> Result<f64, ()> {
         match self.input_type() {
-            InputType::Date => match value.parse_date_string() {
-                Ok((year, month, day)) => {
-                    let d = NaiveDate::from_ymd(year, month, day);
-                    let duration = d.signed_duration_since(NaiveDate::from_ymd(1970, 1, 1));
-                    Ok(duration.num_milliseconds() as f64)
-                },
-                _ => Err(()),
-            },
+            InputType::Date => value
+                .parse_date_string()
+                .ok()
+                .and_then(|(year, month, day)| NaiveDate::from_ymd_opt(year, month, day))
+                .and_then(|date| date.and_hms_opt(0, 0, 0))
+                .map(|time| Ok(time.timestamp_millis() as f64))
+                .unwrap_or(Err(())),
             InputType::Month => match value.parse_month_string() {
                 // This one returns number of months, not milliseconds
                 // (specification requires this, presumably because number of
@@ -2152,30 +2155,32 @@ impl HTMLInputElement {
                 Ok((year, month)) => Ok(((year - 1970) * 12) as f64 + (month as f64 - 1.0)),
                 _ => Err(()),
             },
-            InputType::Week => match value.parse_week_string() {
-                Ok((year, weeknum)) => {
-                    let d = NaiveDate::from_isoywd(year, weeknum, Weekday::Mon);
-                    let duration = d.signed_duration_since(NaiveDate::from_ymd(1970, 1, 1));
-                    Ok(duration.num_milliseconds() as f64)
-                },
-                _ => Err(()),
-            },
+            InputType::Week => value
+                .parse_week_string()
+                .ok()
+                .and_then(|(year, weeknum)| NaiveDate::from_isoywd_opt(year, weeknum, Weekday::Mon))
+                .and_then(|date| date.and_hms_opt(0, 0, 0))
+                .map(|time| Ok(time.timestamp_millis() as f64))
+                .unwrap_or(Err(())),
             InputType::Time => match value.parse_time_string() {
                 Ok((hours, minutes, seconds)) => {
                     Ok((seconds as f64 + 60.0 * minutes as f64 + 3600.0 * hours as f64) * 1000.0)
                 },
                 _ => Err(()),
             },
-            InputType::DatetimeLocal => match value.parse_local_date_and_time_string() {
+            InputType::DatetimeLocal => {
                 // Is this supposed to know the locale's daylight-savings-time rules?
-                Ok(((year, month, day), (hours, minutes, seconds))) => {
-                    let d = NaiveDate::from_ymd(year, month, day);
-                    let ymd_duration = d.signed_duration_since(NaiveDate::from_ymd(1970, 1, 1));
-                    let hms_millis =
-                        (seconds + 60.0 * minutes as f64 + 3600.0 * hours as f64) * 1000.0;
-                    Ok(ymd_duration.num_milliseconds() as f64 + hms_millis)
-                },
-                _ => Err(()),
+                value
+                    .parse_local_date_and_time_string()
+                    .ok()
+                    .and_then(|((year, month, day), (hours, minutes, seconds))| {
+                        let hms_millis =
+                            (seconds + 60.0 * minutes as f64 + 3600.0 * hours as f64) * 1000.0;
+                        NaiveDate::from_ymd_opt(year, month, day)
+                            .and_then(|date| date.and_hms_opt(0, 0, 0))
+                            .map(|time| Ok(time.timestamp_millis() as f64 + hms_millis))
+                    })
+                    .unwrap_or(Err(()))
             },
             InputType::Number | InputType::Range => value.parse_floating_point_number(),
             // min/max/valueAsNumber/stepDown/stepUp do not apply to
@@ -2227,25 +2232,34 @@ impl HTMLInputElement {
         match self.input_type() {
             InputType::Date => value
                 .parse_date_string()
-                .and_then(|(y, m, d)| NaiveDate::from_ymd_opt(y, m, d).ok_or(()))
-                .map(|date| date.and_hms(0, 0, 0)),
-            InputType::Time => value.parse_time_string().and_then(|(h, m, s)| {
-                let whole_seconds = s.floor();
-                let nanos = ((s - whole_seconds) * 1e9).floor() as u32;
-                NaiveDate::from_ymd(1970, 1, 1)
-                    .and_hms_nano_opt(h, m, whole_seconds as u32, nanos)
-                    .ok_or(())
-            }),
+                .ok()
+                .and_then(|(y, m, d)| NaiveDate::from_ymd_opt(y, m, d))
+                .and_then(|date| date.and_hms_opt(0, 0, 0))
+                .ok_or(()),
+            InputType::Time => value
+                .parse_time_string()
+                .ok()
+                .and_then(|(h, m, s)| {
+                    let whole_seconds = s.floor();
+                    let nanos = ((s - whole_seconds) * 1e9).floor() as u32;
+                    NaiveDate::from_ymd_opt(1970, 1, 1)
+                        .and_then(|date| date.and_hms_nano_opt(h, m, whole_seconds as u32, nanos))
+                })
+                .ok_or(()),
             InputType::Week => value
                 .parse_week_string()
+                .ok()
                 .and_then(|(iso_year, week)| {
-                    NaiveDate::from_isoywd_opt(iso_year, week, Weekday::Mon).ok_or(())
+                    NaiveDate::from_isoywd_opt(iso_year, week, Weekday::Mon)
                 })
-                .map(|date| date.and_hms(0, 0, 0)),
+                .and_then(|date| date.and_hms_opt(0, 0, 0))
+                .ok_or(()),
             InputType::Month => value
                 .parse_month_string()
-                .and_then(|(y, m)| NaiveDate::from_ymd_opt(y, m, 1).ok_or(()))
-                .map(|date| date.and_hms(0, 0, 0)),
+                .ok()
+                .and_then(|(y, m)| NaiveDate::from_ymd_opt(y, m, 1))
+                .and_then(|date| date.and_hms_opt(0, 0, 0))
+                .ok_or(()),
             // does not apply to other types
             _ => Err(()),
         }
@@ -2340,7 +2354,6 @@ impl VirtualMethods for HTMLInputElement {
                         }
 
                         let new_value_mode = self.value_mode();
-
                         match (&old_value_mode, old_idl_value.is_empty(), new_value_mode) {
                             // Step 1
                             (&ValueMode::Value, false, ValueMode::Default) |
@@ -2452,15 +2465,17 @@ impl VirtualMethods for HTMLInputElement {
                 }
                 self.update_placeholder_shown_state();
             },
-            &local_name!("readonly") if self.input_type().is_textual() => {
-                let el = self.upcast::<Element>();
-                match mutation {
-                    AttributeMutation::Set(_) => {
-                        el.set_read_write_state(false);
-                    },
-                    AttributeMutation::Removed => {
-                        el.set_read_write_state(!el.disabled_state());
-                    },
+            &local_name!("readonly") => {
+                if self.input_type().is_textual() {
+                    let el = self.upcast::<Element>();
+                    match mutation {
+                        AttributeMutation::Set(_) => {
+                            el.set_read_write_state(false);
+                        },
+                        AttributeMutation::Removed => {
+                            el.set_read_write_state(!el.disabled_state());
+                        },
+                    }
                 }
             },
             &local_name!("form") => {
@@ -2468,6 +2483,9 @@ impl VirtualMethods for HTMLInputElement {
             },
             _ => {},
         }
+
+        self.validity_state()
+            .perform_validation_and_update(ValidationFlags::all());
     }
 
     fn parse_plain_attribute(&self, name: &LocalName, value: DOMString) -> AttrValue {
@@ -2494,6 +2512,9 @@ impl VirtualMethods for HTMLInputElement {
         }
         self.upcast::<Element>()
             .check_ancestors_disabled_state_for_form_control();
+
+        self.validity_state()
+            .perform_validation_and_update(ValidationFlags::all());
     }
 
     fn unbind_from_tree(&self, context: &UnbindContext) {
@@ -2509,6 +2530,9 @@ impl VirtualMethods for HTMLInputElement {
         } else {
             el.check_disabled_attribute();
         }
+
+        self.validity_state()
+            .perform_validation_and_update(ValidationFlags::all());
     }
 
     // This represents behavior for which the UIEvents spec and the
@@ -2608,6 +2632,9 @@ impl VirtualMethods for HTMLInputElement {
                 event.mark_as_handled();
             }
         }
+
+        self.validity_state()
+            .perform_validation_and_update(ValidationFlags::all());
     }
 
     // https://html.spec.whatwg.org/multipage/#the-input-element%3Aconcept-node-clone-ext
@@ -2624,10 +2651,12 @@ impl VirtualMethods for HTMLInputElement {
         elem.value_dirty.set(self.value_dirty.get());
         elem.checked_changed.set(self.checked_changed.get());
         elem.upcast::<Element>()
-            .set_state(ElementState::IN_CHECKED_STATE, self.Checked());
+            .set_state(ElementState::CHECKED, self.Checked());
         elem.textinput
             .borrow_mut()
             .set_content(self.textinput.borrow().get_content());
+        elem.validity_state()
+            .perform_validation_and_update(ValidationFlags::all());
     }
 }
 

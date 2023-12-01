@@ -2,6 +2,13 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
+use cssparser::{Parser, ParserInput};
+use dom_struct::dom_struct;
+use servo_arc::Arc;
+use style::shared_lock::{Locked, ToCssWithGuard};
+use style::stylesheets::keyframes_rule::{Keyframe, KeyframeSelector, KeyframesRule};
+use style::values::KeyframesName;
+
 use crate::dom::bindings::codegen::Bindings::CSSKeyframesRuleBinding::CSSKeyframesRuleMethods;
 use crate::dom::bindings::error::ErrorResult;
 use crate::dom::bindings::inheritance::Castable;
@@ -13,17 +20,12 @@ use crate::dom::cssrule::{CSSRule, SpecificCSSRule};
 use crate::dom::cssrulelist::{CSSRuleList, RulesSource};
 use crate::dom::cssstylesheet::CSSStyleSheet;
 use crate::dom::window::Window;
-use cssparser::{Parser, ParserInput};
-use dom_struct::dom_struct;
-use servo_arc::Arc;
-use style::shared_lock::{Locked, ToCssWithGuard};
-use style::stylesheets::keyframes_rule::{Keyframe, KeyframeSelector, KeyframesRule};
-use style::values::KeyframesName;
 
 #[dom_struct]
 pub struct CSSKeyframesRule {
     cssrule: CSSRule,
     #[ignore_malloc_size_of = "Arc"]
+    #[no_trace]
     keyframesrule: Arc<Locked<KeyframesRule>>,
     rulelist: MutNullableDom<CSSRuleList>,
 }
@@ -40,7 +42,7 @@ impl CSSKeyframesRule {
         }
     }
 
-    #[allow(unrooted_must_root)]
+    #[allow(crown::unrooted_must_root)]
     pub fn new(
         window: &Window,
         parent_stylesheet: &CSSStyleSheet,

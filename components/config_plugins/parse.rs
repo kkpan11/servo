@@ -4,7 +4,8 @@
 
 use proc_macro2::Span;
 use syn::parse::{Parse, ParseStream, Result};
-use syn::{braced, punctuated::Punctuated, token, Attribute, Ident, Path, Token, Type};
+use syn::punctuated::Punctuated;
+use syn::{braced, token, Attribute, Ident, Path, Token, Type};
 
 #[allow(non_camel_case_types)]
 mod kw {
@@ -55,7 +56,8 @@ pub struct RootTypeDef {
 
 impl Parse for MacroInput {
     fn parse(input: ParseStream<'_>) -> Result<Self> {
-        let fields: Punctuated<MacroArg, Token![, ]> = input.parse_terminated(MacroArg::parse)?;
+        let fields: Punctuated<MacroArg, Token![, ]> =
+            Punctuated::parse_terminated_with(input, MacroArg::parse)?;
         let mut gen_accessors = None;
         let mut type_def = None;
         let mut accessor_type = None;
@@ -133,7 +135,7 @@ impl Parse for NewTypeDef {
         #[allow(clippy::eval_order_dependence)]
         Ok(NewTypeDef {
             _braces: braced!(content in input),
-            fields: content.parse_terminated(Field::parse)?,
+            fields: Punctuated::parse_terminated_with(&content, Field::parse)?,
         })
     }
 }

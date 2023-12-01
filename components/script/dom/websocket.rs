@@ -2,6 +2,25 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
+use std::borrow::ToOwned;
+use std::cell::Cell;
+use std::ptr;
+
+use dom_struct::dom_struct;
+use ipc_channel::ipc::{self, IpcReceiver, IpcSender};
+use ipc_channel::router::ROUTER;
+use js::jsapi::{JSAutoRealm, JSObject};
+use js::jsval::UndefinedValue;
+use js::rust::{CustomAutoRooterGuard, HandleObject};
+use js::typedarray::{ArrayBuffer, ArrayBufferView, CreateWith};
+use net_traits::request::{Referrer, RequestBuilder, RequestMode};
+use net_traits::{
+    CoreResourceMsg, FetchChannels, MessageData, WebSocketDomAction, WebSocketNetworkEvent,
+};
+use profile_traits::ipc as ProfiledIpc;
+use script_traits::serializable::BlobImpl;
+use servo_url::{ImmutableOrigin, ServoUrl};
+
 use crate::dom::bindings::cell::DomRefCell;
 use crate::dom::bindings::codegen::Bindings::BlobBinding::BlobMethods;
 use crate::dom::bindings::codegen::Bindings::WebSocketBinding::{BinaryType, WebSocketMethods};
@@ -24,23 +43,6 @@ use crate::script_runtime::ScriptThreadEventCategory::WebSocketEvent;
 use crate::task::{TaskCanceller, TaskOnce};
 use crate::task_source::websocket::WebsocketTaskSource;
 use crate::task_source::TaskSource;
-use dom_struct::dom_struct;
-use ipc_channel::ipc::{self, IpcReceiver, IpcSender};
-use ipc_channel::router::ROUTER;
-use js::jsapi::{JSAutoRealm, JSObject};
-use js::jsval::UndefinedValue;
-use js::rust::{CustomAutoRooterGuard, HandleObject};
-use js::typedarray::{ArrayBuffer, ArrayBufferView, CreateWith};
-use net_traits::request::{Referrer, RequestBuilder, RequestMode};
-use net_traits::MessageData;
-use net_traits::{CoreResourceMsg, FetchChannels};
-use net_traits::{WebSocketDomAction, WebSocketNetworkEvent};
-use profile_traits::ipc as ProfiledIpc;
-use script_traits::serializable::BlobImpl;
-use servo_url::{ImmutableOrigin, ServoUrl};
-use std::borrow::ToOwned;
-use std::cell::Cell;
-use std::ptr;
 
 #[derive(Clone, Copy, Debug, JSTraceable, MallocSizeOf, PartialEq)]
 enum WebSocketRequestState {
@@ -101,11 +103,13 @@ fn fail_the_websocket_connection(
 #[dom_struct]
 pub struct WebSocket {
     eventtarget: EventTarget,
+    #[no_trace]
     url: ServoUrl,
     ready_state: Cell<WebSocketRequestState>,
     buffered_amount: Cell<u64>,
     clearing_buffer: Cell<bool>, //Flag to tell if there is a running thread to clear buffered_amount
     #[ignore_malloc_size_of = "Defined in std"]
+    #[no_trace]
     sender: IpcSender<WebSocketDomAction>,
     binary_type: Cell<BinaryType>,
     protocol: DomRefCell<String>, //Subprotocol selected by server

@@ -12,11 +12,9 @@ use crate::shared_lock::SharedRwLock;
 use crate::thread_state;
 #[cfg(feature = "gecko")]
 use gecko_profiler;
-use parking_lot::{RwLock, RwLockReadGuard};
+use parking_lot::{Mutex, RwLock, RwLockReadGuard};
 use rayon;
-use std::env;
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Mutex;
+use std::{io, thread};
 
 /// Global style data
 pub struct GlobalStyleData {
@@ -43,12 +41,32 @@ fn thread_name(index: usize) -> String {
     format!("Style#{}", index)
 }
 
-// A counter so that we can wait for shutdown of all threads. See
-// StyleThreadPool::shutdown.
-static ALIVE_WORKER_THREADS: AtomicUsize = AtomicUsize::new(0);
+lazy_static! {
+    /// JoinHandles for spawned style threads. These will be joined during
+    /// StyleThreadPool::shutdown() after exiting the thread pool.
+    ///
+    /// This would be quite inefficient if rayon destroyed and re-created
+    /// threads regularly during threadpool operation in response to demand,
+    /// however rayon actually never destroys its threads until the entire
+    /// thread pool is shut-down, so the size of this list is bounded.
+    static ref STYLE_THREAD_JOIN_HANDLES: Mutex<Vec<thread::JoinHandle<()>>> =
+        Mutex::new(Vec::new());
+}
+
+fn thread_spawn(options: rayon::ThreadBuilder) -> io::Result<()> {
+    let mut b = thread::Builder::new();
+    if let Some(name) = options.name() {
+        b = b.name(name.to_owned());
+    }
+    if let Some(stack_size) = options.stack_size() {
+        b = b.stack_size(stack_size);
+    }
+    let join_handle = b.spawn(|| options.run())?;
+    STYLE_THREAD_JOIN_HANDLES.lock().push(join_handle);
+    Ok(())
+}
 
 fn thread_startup(_index: usize) {
-    ALIVE_WORKER_THREADS.fetch_add(1, Ordering::Relaxed);
     thread_state::initialize_layout_worker_thread();
     #[cfg(feature = "gecko")]
     unsafe {
@@ -64,33 +82,24 @@ fn thread_shutdown(_: usize) {
         gecko_profiler::unregister_thread();
         bindings::Gecko_SetJemallocThreadLocalArena(false);
     }
-    ALIVE_WORKER_THREADS.fetch_sub(1, Ordering::Relaxed);
 }
 
 impl StyleThreadPool {
     /// Shuts down the thread pool, waiting for all work to complete.
     pub fn shutdown() {
-        if ALIVE_WORKER_THREADS.load(Ordering::Relaxed) == 0 {
+        if STYLE_THREAD_JOIN_HANDLES.lock().is_empty() {
             return;
         }
         {
             // Drop the pool.
             let _ = STYLE_THREAD_POOL.lock().unwrap().style_thread_pool.write().take();
         }
-        // Spin until all our threads are done. This will usually be pretty
-        // fast, as on shutdown there should be basically no threads left
-        // running.
-        //
-        // This still _technically_ doesn't give us the guarantee of TLS
-        // destructors running on the worker threads. For that we'd need help
-        // from rayon to properly join the threads.
-        //
-        // See https://github.com/rayon-rs/rayon/issues/688
-        //
-        // So we instead intentionally leak TLS stuff (see BLOOM_KEY and co) for
-        // now until that's fixed.
-        while ALIVE_WORKER_THREADS.load(Ordering::Relaxed) != 0 {
-            std::thread::yield_now();
+
+        // Join spawned threads until all of the threads have been joined. This
+        // will usually be pretty fast, as on shutdown there should be basically
+        // no threads left running.
+        while let Some(join_handle) = STYLE_THREAD_JOIN_HANDLES.lock().pop() {
+            let _ = join_handle.join();
         }
     }
 
@@ -103,67 +112,56 @@ impl StyleThreadPool {
     }
 }
 
+#[cfg(feature = "servo")]
+fn stylo_threads_pref() -> i32 {
+    use servo_config::pref;
+    pref!(layout.threads) as i32
+}
+
+#[cfg(feature = "gecko")]
+fn stylo_threads_pref() -> i32 {
+    static_prefs::pref!("layout.css.stylo-threads")
+}
+
+/// The performance benefit of additional threads seems to level off at around six, so we cap it
+/// there on many-core machines (see bug 1431285 comment 14).
+pub(crate) const STYLO_MAX_THREADS: usize = 6;
+
 lazy_static! {
     /// Global thread pool
-    pub static ref STYLE_THREAD_POOL: Mutex<StyleThreadPool> = {
-        let stylo_threads = env::var("STYLO_THREADS")
-            .map(|s| s.parse::<usize>().expect("invalid STYLO_THREADS value"));
-        let mut num_threads = match stylo_threads {
-            Ok(num) => num,
-            #[cfg(feature = "servo")]
-            _ => {
-                use servo_config::pref;
-                // We always set this pref on startup, before layout or script
-                // have had a chance of accessing (and thus creating) the
-                // thread-pool.
-                pref!(layout.threads) as usize
-            }
-            #[cfg(feature = "gecko")]
-            _ => {
-                // The default heuristic is num_virtual_cores * .75. This gives
-                // us three threads on a hyper-threaded dual core, and six
-                // threads on a hyper-threaded quad core. The performance
-                // benefit of additional threads seems to level off at around
-                // six, so we cap it there on many-core machines
-                // (see bug 1431285 comment 14).
-                use num_cpus;
-                use std::cmp;
-                cmp::min(cmp::max(num_cpus::get() * 3 / 4, 1), 6)
-            }
+    pub static ref STYLE_THREAD_POOL: std::sync::Mutex<StyleThreadPool> = {
+        use std::cmp;
+        // We always set this pref on startup, before layout or script have had a chance of
+        // accessing (and thus creating) the thread-pool.
+        let threads_pref: i32 = stylo_threads_pref();
+        let num_threads = if threads_pref >= 0 {
+            threads_pref as usize
+        } else {
+            use num_cpus;
+            // The default heuristic is num_virtual_cores * .75. This gives us three threads on a
+            // hyper-threaded dual core, and six threads on a hyper-threaded quad core.
+            let threads = cmp::max(num_cpus::get() * 3 / 4, 1);
+            // There's no point in creating a thread pool if there's one thread.
+            if threads == 1 { 0 } else { threads }
         };
 
-        // If num_threads is one, there's no point in creating a thread pool, so
-        // force it to zero.
-        //
-        // We allow developers to force a one-thread pool for testing via a
-        // special environmental variable.
-        if num_threads == 1 {
-            let force_pool = env::var("FORCE_STYLO_THREAD_POOL")
-                .ok().map_or(false, |s| s.parse::<usize>().expect("invalid FORCE_STYLO_THREAD_POOL value") == 1);
-            if !force_pool {
-                num_threads = 0;
-            }
-        }
-
-        let pool = if num_threads < 1 {
-            None
+        let num_threads = cmp::min(num_threads, STYLO_MAX_THREADS);
+        let (pool, num_threads) = if num_threads < 1 {
+            (None, None)
         } else {
             let workers = rayon::ThreadPoolBuilder::new()
+                .spawn_handler(thread_spawn)
                 .num_threads(num_threads)
                 .thread_name(thread_name)
                 .start_handler(thread_startup)
                 .exit_handler(thread_shutdown)
                 .stack_size(STYLE_THREAD_STACK_SIZE_KB * 1024)
                 .build();
-            workers.ok()
+            (workers.ok(), Some(num_threads))
         };
 
-        Mutex::new(StyleThreadPool {
-            num_threads: if num_threads > 0 {
-                Some(num_threads)
-            } else {
-                None
-            },
+        std::sync::Mutex::new(StyleThreadPool {
+            num_threads,
             style_thread_pool: RwLock::new(pool),
         })
     };

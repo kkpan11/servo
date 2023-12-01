@@ -10,61 +10,49 @@
 //! thread pool implementation, which only performs GC or code loading on
 //! a backup thread, not on the primary worklet thread.
 
+use std::cell::OnceCell;
+use std::cmp::max;
+use std::collections::{hash_map, HashMap};
+use std::rc::Rc;
+use std::sync::atomic::{AtomicIsize, Ordering};
+use std::sync::Arc;
+use std::thread;
+
+use crossbeam_channel::{unbounded, Receiver, Sender};
+use dom_struct::dom_struct;
+use js::jsapi::{GCReason, JSGCParamKey, JSTracer, JS_GetGCParameter, JS_GC};
+use malloc_size_of::malloc_size_of_is_0;
+use msg::constellation_msg::PipelineId;
+use net_traits::request::{Destination, RequestBuilder, RequestMode};
+use net_traits::IpcSend;
+use servo_url::{ImmutableOrigin, ServoUrl};
+use style::thread_state::{self, ThreadState};
+use swapper::{swapper, Swapper};
+use uuid::Uuid;
+
 use crate::dom::bindings::codegen::Bindings::RequestBinding::RequestCredentials;
-use crate::dom::bindings::codegen::Bindings::WindowBinding::WindowBinding::WindowMethods;
-use crate::dom::bindings::codegen::Bindings::WorkletBinding::WorkletMethods;
-use crate::dom::bindings::codegen::Bindings::WorkletBinding::WorkletOptions;
+use crate::dom::bindings::codegen::Bindings::WindowBinding::Window_Binding::WindowMethods;
+use crate::dom::bindings::codegen::Bindings::WorkletBinding::{WorkletMethods, WorkletOptions};
 use crate::dom::bindings::error::Error;
 use crate::dom::bindings::inheritance::Castable;
 use crate::dom::bindings::refcounted::TrustedPromise;
-use crate::dom::bindings::reflector::reflect_dom_object;
-use crate::dom::bindings::reflector::Reflector;
+use crate::dom::bindings::reflector::{reflect_dom_object, Reflector};
 use crate::dom::bindings::root::{Dom, DomRoot, RootCollection, ThreadLocalStackRoots};
 use crate::dom::bindings::str::USVString;
-use crate::dom::bindings::trace::JSTraceable;
-use crate::dom::bindings::trace::RootedTraceableBox;
+use crate::dom::bindings::trace::{CustomTraceable, JSTraceable, RootedTraceableBox};
 use crate::dom::globalscope::GlobalScope;
 use crate::dom::promise::Promise;
 use crate::dom::testworkletglobalscope::TestWorkletTask;
 use crate::dom::window::Window;
-use crate::dom::workletglobalscope::WorkletGlobalScope;
-use crate::dom::workletglobalscope::WorkletGlobalScopeInit;
-use crate::dom::workletglobalscope::WorkletGlobalScopeType;
-use crate::dom::workletglobalscope::WorkletTask;
+use crate::dom::workletglobalscope::{
+    WorkletGlobalScope, WorkletGlobalScopeInit, WorkletGlobalScopeType, WorkletTask,
+};
 use crate::fetch::load_whole_resource;
 use crate::realms::InRealm;
-use crate::script_runtime::new_rt_and_cx;
-use crate::script_runtime::CommonScriptMsg;
-use crate::script_runtime::Runtime;
-use crate::script_runtime::ScriptThreadEventCategory;
+use crate::script_runtime::{new_rt_and_cx, CommonScriptMsg, Runtime, ScriptThreadEventCategory};
 use crate::script_thread::{MainThreadScriptMsg, ScriptThread};
 use crate::task::TaskBox;
 use crate::task_source::TaskSourceName;
-use crossbeam_channel::{unbounded, Receiver, Sender};
-use dom_struct::dom_struct;
-use js::jsapi::JSGCParamKey;
-use js::jsapi::JSTracer;
-use js::jsapi::JS_GetGCParameter;
-use js::jsapi::{GCReason, JS_GC};
-use msg::constellation_msg::PipelineId;
-use net_traits::request::Destination;
-use net_traits::request::RequestBuilder;
-use net_traits::request::RequestMode;
-use net_traits::IpcSend;
-use servo_url::ImmutableOrigin;
-use servo_url::ServoUrl;
-use std::cmp::max;
-use std::collections::hash_map;
-use std::collections::HashMap;
-use std::rc::Rc;
-use std::sync::atomic::AtomicIsize;
-use std::sync::atomic::Ordering;
-use std::sync::Arc;
-use std::thread;
-use style::thread_state::{self, ThreadState};
-use swapper::swapper;
-use swapper::Swapper;
-use uuid::Uuid;
 
 // Magic numbers
 const WORKLET_THREAD_POOL_SIZE: u32 = 3;
@@ -73,12 +61,18 @@ const MIN_GC_THRESHOLD: u32 = 1_000_000;
 #[derive(JSTraceable, MallocSizeOf)]
 struct DroppableField {
     worklet_id: WorkletId,
+    /// The cached version of the script thread's WorkletThreadPool. We keep this cached
+    /// because we may need to access it after the script thread has terminated.
+    #[ignore_malloc_size_of = "Difficult to measure memory usage of Rc<...> types"]
+    thread_pool: OnceCell<Rc<WorkletThreadPool>>,
 }
 
 impl Drop for DroppableField {
     fn drop(&mut self) {
-        let script_thread = ScriptThread::worklet_thread_pool();
-        script_thread.exit_worklet(self.worklet_id);
+        let worklet_id = self.worklet_id;
+        self.thread_pool.get_mut().map(|thread_pool| {
+            thread_pool.exit_worklet(worklet_id);
+        });
     }
 }
 
@@ -99,6 +93,7 @@ impl Worklet {
             global_type: global_type,
             droppable_field: DroppableField {
                 worklet_id: WorkletId::new(),
+                thread_pool: OnceCell::new(),
             },
         }
     }
@@ -147,19 +142,21 @@ impl WorkletMethods for Worklet {
         // Steps 6-12 in parallel.
         let pending_tasks_struct = PendingTasksStruct::new();
         let global = self.window.upcast::<GlobalScope>();
-        let pool = ScriptThread::worklet_thread_pool();
 
-        pool.fetch_and_invoke_a_worklet_script(
-            global.pipeline_id(),
-            self.droppable_field.worklet_id,
-            self.global_type,
-            self.window.origin().immutable().clone(),
-            global.api_base_url(),
-            module_url_record,
-            options.credentials.clone(),
-            pending_tasks_struct,
-            &promise,
-        );
+        self.droppable_field
+            .thread_pool
+            .get_or_init(ScriptThread::worklet_thread_pool)
+            .fetch_and_invoke_a_worklet_script(
+                global.pipeline_id(),
+                self.droppable_field.worklet_id,
+                self.global_type,
+                self.window.origin().immutable().clone(),
+                global.api_base_url(),
+                module_url_record,
+                options.credentials.clone(),
+                pending_tasks_struct,
+                &promise,
+            );
 
         // Step 5.
         debug!("Returning promise.");
@@ -169,7 +166,7 @@ impl WorkletMethods for Worklet {
 
 /// A guid for worklets.
 #[derive(Clone, Copy, Debug, Eq, Hash, JSTraceable, PartialEq)]
-pub struct WorkletId(Uuid);
+pub struct WorkletId(#[no_trace] Uuid);
 
 malloc_size_of_is_0!(WorkletId);
 
@@ -251,12 +248,18 @@ impl PendingTasksStruct {
 #[derive(Clone, JSTraceable)]
 pub struct WorkletThreadPool {
     // Channels to send data messages to the three roles.
+    #[no_trace]
     primary_sender: Sender<WorkletData>,
+    #[no_trace]
     hot_backup_sender: Sender<WorkletData>,
+    #[no_trace]
     cold_backup_sender: Sender<WorkletData>,
     // Channels to send control messages to the three threads.
+    #[no_trace]
     control_sender_0: Sender<WorkletControl>,
+    #[no_trace]
     control_sender_1: Sender<WorkletControl>,
+    #[no_trace]
     control_sender_2: Sender<WorkletControl>,
 }
 
@@ -421,7 +424,7 @@ struct WorkletThreadInit {
 }
 
 /// A thread for executing worklets.
-#[unrooted_must_root_lint::must_root]
+#[crown::unrooted_must_root_lint::must_root]
 struct WorkletThread {
     /// Which role the thread is currently playing
     role: WorkletThreadRole,
@@ -460,7 +463,7 @@ unsafe impl JSTraceable for WorkletThread {
 impl WorkletThread {
     /// Spawn a new worklet thread, returning the channel to send it control messages.
     #[allow(unsafe_code)]
-    #[allow(unrooted_must_root)]
+    #[allow(crown::unrooted_must_root)]
     fn spawn(role: WorkletThreadRole, init: WorkletThreadInit) -> Sender<WorkletControl> {
         let (control_sender, control_receiver) = unbounded();
         // TODO: name this thread
@@ -508,9 +511,14 @@ impl WorkletThread {
                 //       this total ordering on thread roles is what guarantees deadlock-freedom.
                 WorkletData::StartSwapRoles(sender) => {
                     let (our_swapper, their_swapper) = swapper();
-                    sender
-                        .send(WorkletData::FinishSwapRoles(their_swapper))
-                        .unwrap();
+                    match sender.send(WorkletData::FinishSwapRoles(their_swapper)) {
+                        Ok(_) => {},
+                        Err(_) => {
+                            // This might happen if the script thread shuts down while
+                            // waiting for the worklet to finish.
+                            return;
+                        },
+                    };
                     let _ = our_swapper.swap(&mut self.role);
                 },
                 // To finish swapping roles, perform the atomic swap.
@@ -746,6 +754,7 @@ impl WorkletThread {
 pub struct WorkletExecutor {
     worklet_id: WorkletId,
     #[ignore_malloc_size_of = "channels are hard"]
+    #[no_trace]
     primary_sender: Sender<WorkletData>,
 }
 

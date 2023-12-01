@@ -2,8 +2,13 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
+use std::string::String;
+
+use dom_struct::dom_struct;
+use webgpu::{WebGPUBindGroupLayout, WebGPUComputePipeline};
+
 use crate::dom::bindings::cell::DomRefCell;
-use crate::dom::bindings::codegen::Bindings::GPUComputePipelineBinding::GPUComputePipelineMethods;
+use crate::dom::bindings::codegen::Bindings::WebGPUBinding::GPUComputePipelineMethods;
 use crate::dom::bindings::error::{Error, Fallible};
 use crate::dom::bindings::reflector::{reflect_dom_object, DomObject, Reflector};
 use crate::dom::bindings::root::{Dom, DomRoot};
@@ -11,15 +16,14 @@ use crate::dom::bindings::str::USVString;
 use crate::dom::globalscope::GlobalScope;
 use crate::dom::gpubindgrouplayout::GPUBindGroupLayout;
 use crate::dom::gpudevice::GPUDevice;
-use dom_struct::dom_struct;
-use std::string::String;
-use webgpu::{WebGPUBindGroupLayout, WebGPUComputePipeline};
 
 #[dom_struct]
 pub struct GPUComputePipeline {
     reflector_: Reflector,
-    label: DomRefCell<Option<USVString>>,
+    label: DomRefCell<USVString>,
+    #[no_trace]
     compute_pipeline: WebGPUComputePipeline,
+    #[no_trace]
     bind_group_layouts: Vec<WebGPUBindGroupLayout>,
     device: Dom<GPUDevice>,
 }
@@ -27,7 +31,7 @@ pub struct GPUComputePipeline {
 impl GPUComputePipeline {
     fn new_inherited(
         compute_pipeline: WebGPUComputePipeline,
-        label: Option<USVString>,
+        label: USVString,
         bgls: Vec<WebGPUBindGroupLayout>,
         device: &GPUDevice,
     ) -> Self {
@@ -43,7 +47,7 @@ impl GPUComputePipeline {
     pub fn new(
         global: &GlobalScope,
         compute_pipeline: WebGPUComputePipeline,
-        label: Option<USVString>,
+        label: USVString,
         bgls: Vec<WebGPUBindGroupLayout>,
         device: &GPUDevice,
     ) -> DomRoot<Self> {
@@ -67,12 +71,12 @@ impl GPUComputePipeline {
 
 impl GPUComputePipelineMethods for GPUComputePipeline {
     /// https://gpuweb.github.io/gpuweb/#dom-gpuobjectbase-label
-    fn GetLabel(&self) -> Option<USVString> {
+    fn Label(&self) -> USVString {
         self.label.borrow().clone()
     }
 
     /// https://gpuweb.github.io/gpuweb/#dom-gpuobjectbase-label
-    fn SetLabel(&self, value: Option<USVString>) {
+    fn SetLabel(&self, value: USVString) {
         *self.label.borrow_mut() = value;
     }
 
@@ -84,7 +88,7 @@ impl GPUComputePipelineMethods for GPUComputePipeline {
         Ok(GPUBindGroupLayout::new(
             &self.global(),
             self.bind_group_layouts[index as usize],
-            None,
+            USVString::default(),
         ))
     }
 }

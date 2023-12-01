@@ -2,6 +2,17 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
+use std::default::Default;
+use std::{f32, str};
+
+use cssparser::match_ignore_ascii_case;
+use dom_struct::dom_struct;
+use euclid::default::Point2D;
+use html5ever::{local_name, LocalName, Prefix};
+use js::rust::HandleObject;
+use servo_atoms::Atom;
+use style::attr::AttrValue;
+
 use crate::dom::activation::Activatable;
 use crate::dom::bindings::codegen::Bindings::HTMLAreaElementBinding::HTMLAreaElementMethods;
 use crate::dom::bindings::inheritance::Castable;
@@ -16,15 +27,6 @@ use crate::dom::htmlanchorelement::follow_hyperlink;
 use crate::dom::htmlelement::HTMLElement;
 use crate::dom::node::Node;
 use crate::dom::virtualmethods::VirtualMethods;
-use dom_struct::dom_struct;
-use euclid::default::Point2D;
-use html5ever::{LocalName, Prefix};
-use js::rust::HandleObject;
-use servo_atoms::Atom;
-use std::default::Default;
-use std::f32;
-use std::str;
-use style::attr::AttrValue;
 
 #[derive(Debug, PartialEq)]
 pub enum Area {
@@ -249,7 +251,7 @@ impl HTMLAreaElement {
         }
     }
 
-    #[allow(unrooted_must_root)]
+    #[allow(crown::unrooted_must_root)]
     pub fn new(
         local_name: LocalName,
         prefix: Option<Prefix>,

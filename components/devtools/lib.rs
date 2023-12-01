@@ -12,10 +12,26 @@
 #![allow(non_snake_case)]
 #![deny(unsafe_code)]
 
-#[macro_use]
-extern crate log;
-#[macro_use]
-extern crate serde;
+use std::borrow::ToOwned;
+use std::collections::hash_map::Entry::{Occupied, Vacant};
+use std::collections::HashMap;
+use std::io::Read;
+use std::net::{Shutdown, TcpListener, TcpStream};
+use std::sync::{Arc, Mutex};
+use std::thread;
+
+use crossbeam_channel::{unbounded, Receiver, Sender};
+use devtools_traits::{
+    ChromeToDevtoolsControlMsg, ConsoleMessage, DevtoolScriptControlMsg, DevtoolsControlMsg,
+    DevtoolsPageInfo, LogLevel, NavigationState, NetworkEvent, PageError,
+    ScriptToDevtoolsControlMsg, WorkerId,
+};
+use embedder_traits::{EmbedderMsg, EmbedderProxy, PromptDefinition, PromptOrigin, PromptResult};
+use ipc_channel::ipc::{self, IpcSender};
+use log::{debug, warn};
+use msg::constellation_msg::{BrowsingContextId, PipelineId};
+use serde::Serialize;
+use servo_rand::RngCore;
 
 use crate::actor::{Actor, ActorRegistry};
 use crate::actors::browsing_context::BrowsingContextActor;
@@ -30,23 +46,6 @@ use crate::actors::root::RootActor;
 use crate::actors::thread::ThreadActor;
 use crate::actors::worker::{WorkerActor, WorkerType};
 use crate::protocol::JsonPacketStream;
-use crossbeam_channel::{unbounded, Receiver, Sender};
-use devtools_traits::{ChromeToDevtoolsControlMsg, ConsoleMessage, DevtoolsControlMsg};
-use devtools_traits::{
-    DevtoolScriptControlMsg, DevtoolsPageInfo, LogLevel, NavigationState, NetworkEvent,
-};
-use devtools_traits::{PageError, ScriptToDevtoolsControlMsg, WorkerId};
-use embedder_traits::{EmbedderMsg, EmbedderProxy, PromptDefinition, PromptOrigin, PromptResult};
-use ipc_channel::ipc::{self, IpcSender};
-use msg::constellation_msg::{BrowsingContextId, PipelineId};
-use servo_rand::RngCore;
-use std::borrow::ToOwned;
-use std::collections::hash_map::Entry::{Occupied, Vacant};
-use std::collections::HashMap;
-use std::io::Read;
-use std::net::{Shutdown, TcpListener, TcpStream};
-use std::sync::{Arc, Mutex};
-use std::thread;
 
 mod actor;
 /// Corresponds to http://mxr.mozilla.org/mozilla-central/source/toolkit/devtools/server/actors/

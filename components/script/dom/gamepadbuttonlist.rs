@@ -2,11 +2,12 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
+use dom_struct::dom_struct;
+
 use crate::dom::bindings::codegen::Bindings::GamepadButtonListBinding::GamepadButtonListMethods;
 use crate::dom::bindings::reflector::Reflector;
 use crate::dom::bindings::root::{Dom, DomRoot};
 use crate::dom::gamepadbutton::GamepadButton;
-use dom_struct::dom_struct;
 
 // https://w3c.github.io/gamepad/#gamepadbutton-interface
 #[dom_struct]
@@ -18,7 +19,7 @@ pub struct GamepadButtonList {
 // TODO: support gamepad discovery
 #[allow(dead_code)]
 impl GamepadButtonList {
-    #[allow(unrooted_must_root)]
+    #[allow(crown::unrooted_must_root)]
     fn new_inherited(list: &[&GamepadButton]) -> GamepadButtonList {
         GamepadButtonList {
             reflector_: Reflector::new(),
